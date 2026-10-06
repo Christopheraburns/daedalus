@@ -1,0 +1,21 @@
+# Development foundation; requirements.lock pins all transitive dependencies/hashes.
+# Resolve for CPython 3.12 / Linux x86_64. Upgrade through a reviewed lock refresh.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+pydantic>=2.10,<3
+pydantic-settings>=2.7,<3
+httpx>=0.28,<1
+PyYAML>=6,<7
+jsonschema>=4.23,<5
+SQLAlchemy>=2.0,<3
+alembic>=1.14,<2
+psycopg[binary]>=3.2,<4
+PyJWT[crypto]>=2.10,<3
+opentelemetry-api>=1.30,<2
+opentelemetry-sdk>=1.30,<2
+opentelemetry-exporter-otlp-proto-http>=1.30,<2
+# Candidate SDK for the protocol spike, not a claim of latest MCP conformance.
+mcp>=1.9,<2
+pytest>=8,<10
+pytest-asyncio>=0.25,<2
+ruff>=0.11,<1

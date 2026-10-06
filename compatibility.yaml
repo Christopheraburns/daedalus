@@ -1,0 +1,38 @@
+schema_version: 1
+status: development-foundation
+cloudera:
+  workbench_version: null # Fill from the deployment.
+  base_image: docker.repository.cloudera.com/cloudera/cdsw/ml-runtime-pbj-workbench-python3.12-standard:2026.08.1-b5@sha256:106220420aa35e733fe362a07a0f14af11d2d27f58aa527fa13d931598ef7262
+  runtime_image: null # Pushed repository@sha256 reference.
+  os_family: ubuntu
+  architecture: amd64
+  python: '3.12'
+  edition: MCP Factory Development
+  version: 0.1.1
+agentgateway:
+  version: 1.6.0
+  artifact: agentgateway-linux-amd64
+  sha256: 496ed27e6a96b55a9ad7cabe5c2be7172511f44a3cb113e533d22bf93a7f079d
+node:
+  version: 22.23.3
+  artifact: node-v22.23.3-linux-x64.tar.xz
+  sha256: df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
+python_dependencies:
+  lockfile: runtime/requirements.lock
+  mcp_sdk_candidate: 1.30.0
+protocol:
+  target_profiles: ['2026-07-28', '2025-11-25']
+  verified_profiles: []
+  normative_schema_commit: null
+validation:
+  local_image_build: passed
+  local_smoke_check: passed
+  local_test_base: docker.repository.cloudera.com/cloudera/cdsw/ml-runtime-pbj-workbench-python3.12-standard:2026.08.1-b5@sha256:106220420aa35e733fe362a07a0f14af11d2d27f58aa527fa13d931598ef7262
+  local_image_tag: mcp-factory-runtime:0.1.1
+  local_image_id: sha256:f6cc950e864096c965c9667d4edbe4ecce3ab42b2fc772efd7f9edaddc030b53
+  local_test_date: '2026-10-06'
+  target_workbench_registration: pending
+  ingress_and_oauth: pending
+  gateway_reload: pending
+  persistence: pending
+  sbom_and_vulnerability_scan: pending

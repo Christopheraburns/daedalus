@@ -1,0 +1,10 @@
+# Allowlist: project files, credentials, and future customer configs stay out.
+**
+!runtime/
+!runtime/Dockerfile
+!runtime/requirements.lock
+!runtime/smoke_check.py
+!runtime/bin/
+!runtime/bin/mcp-factory-python
+!runtime/licenses/
+!runtime/licenses/agentgateway-LICENSE

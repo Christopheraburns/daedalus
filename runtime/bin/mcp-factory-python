@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/mcp-factory/venv/bin/python "$@"
