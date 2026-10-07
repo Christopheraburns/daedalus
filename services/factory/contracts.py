@@ -13,6 +13,12 @@ class ConnectionSpec(Contract):
     auth_mode: Literal["none"] = "none"
 
 
+class ApiOriginSpec(Contract):
+    origin: str = Field(min_length=1, max_length=300)
+    description: str = Field(default="", max_length=240)
+    enabled: bool = True
+
+
 class ServerSpec(Contract):
     name: str = Field(min_length=1, max_length=80)
 

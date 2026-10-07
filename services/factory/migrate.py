@@ -1,7 +1,7 @@
 from alembic import command
 from alembic.config import Config
 
-from .db import Deployment, Layout, Server, database
+from .db import ApiOrigin, Deployment, Layout, Server, database
 from .settings import ROOT, SERVER_ID, Settings
 
 
@@ -15,6 +15,9 @@ def main():
             session.flush()
             session.add(Layout(server_id=SERVER_ID))
             session.add(Deployment(server_id=SERVER_ID))
+            for origin in settings.allowed_origins:
+                if origin:
+                    session.add(ApiOrigin(server_id=SERVER_ID, origin=origin, description="Environment bootstrap origin"))
     engine.dispose()
 
 

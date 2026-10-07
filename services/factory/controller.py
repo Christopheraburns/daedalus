@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .compiler import compile_bundle, digest
-from .db import Release, Server, audit, database, now
+from .db import ApiOrigin, Release, Server, audit, database, now
 from .gateway import candidate, gateway_config, stop_process, validate_config, verify_effective, write_atomic
 from .settings import LEGACY, MODERN, Settings
 
@@ -48,7 +48,8 @@ def main():
             if active and digest(bundle) != active.checksum:
                 raise RuntimeError("Last active release failed integrity verification")
             # Revalidate approved origins at every startup, including saved releases.
-            compile_bundle(bundle["tools"], bundle["connections"], settings.allowed_origins)
+            approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
+            compile_bundle(bundle["tools"], bundle["connections"], approved)
         config = gateway_config(bundle, release_id, settings)
         validate_config(config, settings, config_path)
         started_at = now().isoformat()
@@ -82,7 +83,8 @@ def main():
                         try:
                             if digest(next_bundle) != checksum:
                                 raise ValueError("Release checksum mismatch")
-                            compile_bundle(next_bundle["tools"], next_bundle["connections"], settings.allowed_origins)
+                            approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
+                            compile_bundle(next_bundle["tools"], next_bundle["connections"], approved)
                             with candidate(next_bundle, settings) as (_, _, next_catalog):
                                 config = gateway_config(next_bundle, next_id, settings)
                                 staged = settings.state_dir / "validated.json"

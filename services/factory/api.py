@@ -6,6 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -14,8 +15,8 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import select, text
 
 from .compiler import compile_bundle, digest, fingerprint, validate_connection, validate_tool
-from .contracts import ConnectionSpec, DeploymentAction, LayoutSpec, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
-from .db import Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
+from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, LayoutSpec, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
+from .db import ApiOrigin, Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
 from .gateway import candidate, rpc
 from .settings import SERVER_ID, Settings
 
@@ -69,6 +70,19 @@ def create_app(settings=None):
                 raise HTTPException(403, "Your role does not permit this action")
             return role
         return dependency
+
+    def policy_origins(session, server_id):
+        rows = list(session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)).order_by(ApiOrigin.origin)))
+        return [row.origin for row in rows] or settings.allowed_origins
+
+    def origin_value(value):
+        parsed = urlsplit(value.rstrip("/"))
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("Use an HTTP(S) origin without credentials, path, query, or fragment")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def origin_json(item):
+        return {"id": item.id, "server_id": item.server_id, "revision": item.revision, "origin": item.origin, "description": item.description, "enabled": item.enabled, "created_at": item.created_at.isoformat()}
 
     def selected(server_id):
         return server_id or SERVER_ID
@@ -209,6 +223,9 @@ def create_app(settings=None):
             server = Server(id=new_id(), name=spec.name)
             session.add(server); session.flush()
             session.add(Layout(server_id=server.id)); session.add(Deployment(server_id=server.id, provider=settings.deployment_provider))
+            for origin in settings.allowed_origins:
+                if origin:
+                    session.add(ApiOrigin(server_id=server.id, origin=origin, description="Environment bootstrap origin"))
             audit(session, role, "server.create", server.id, name=server.name)
             return {"id": server.id, "name": server.name, "revision": server.revision}
 
@@ -231,18 +248,55 @@ def create_app(settings=None):
                 "active_tools": active.bundle["tools"] if active else [],
                 "releases": [release_json(r) for r in session.scalars(select(Release).where(Release.server_id == server_id).order_by(Release.created_at.desc()).limit(20))],
                 "deployment": deployment_json(deployment),
-                "allowed_api_origins": settings.allowed_origins,
+                "allowed_api_origins": policy_origins(session, server_id),
                 "limits": {"methods": ["GET", "POST"], "parameter_locations": ["path", "query"], "max_tools": 100}}
+
+    @app.get("/api/policies/origins")
+    def list_origins(server_id: str | None = Query(default=None), role=Depends(identity)):
+        with sessions() as session:
+            server_id = selected(server_id); rows = list(session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id).order_by(ApiOrigin.origin)))
+            if not rows:
+                return [{"id": f"bootstrap-{index}", "server_id": server_id, "revision": 0, "origin": origin, "description": "Environment bootstrap origin", "enabled": True, "bootstrap": True} for index, origin in enumerate(settings.allowed_origins) if origin]
+            return [origin_json(row) for row in rows]
+
+    @app.post("/api/policies/origins", status_code=201)
+    def create_origin(spec: ApiOriginSpec, server_id: str | None = Query(default=None), role=Depends(require("author"))):
+        try: origin = origin_value(spec.origin)
+        except ValueError as exc: raise HTTPException(422, str(exc))
+        with sessions.begin() as session:
+            server_id = selected(server_id); server = server_lock(session, server_id)
+            if session.scalar(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.origin == origin)):
+                raise HTTPException(409, "This API origin is already registered")
+            item = ApiOrigin(server_id=server_id, origin=origin, description=spec.description, enabled=spec.enabled)
+            session.add(item); server.revision += 1; session.flush(); audit(session, role, "policy.origin.create", item.id, origin=origin)
+            return origin_json(item)
+
+    @app.patch("/api/policies/origins/{id}")
+    def update_origin(id: str, spec: ApiOriginSpec, server_id: str | None = Query(default=None), if_match: str | None = Header(default=None), role=Depends(require("author"))):
+        try: origin = origin_value(spec.origin)
+        except ValueError as exc: raise HTTPException(422, str(exc))
+        with sessions.begin() as session:
+            server_id = selected(server_id); server = server_lock(session, server_id); item = get(session, ApiOrigin, id)
+            if item.server_id != server_id: raise HTTPException(404, "Record not found")
+            revision(item.revision, if_match); item.origin, item.description, item.enabled, item.revision = origin, spec.description, spec.enabled, item.revision + 1
+            server.revision += 1; audit(session, role, "policy.origin.update", id, origin=origin); return origin_json(item)
+
+    @app.delete("/api/policies/origins/{id}", status_code=204)
+    def delete_origin(id: str, server_id: str | None = Query(default=None), if_match: str | None = Header(default=None), role=Depends(require("author"))):
+        with sessions.begin() as session:
+            server_id = selected(server_id); server = server_lock(session, server_id); item = get(session, ApiOrigin, id)
+            if item.server_id != server_id: raise HTTPException(404, "Record not found")
+            revision(item.revision, if_match); session.delete(item); server.revision += 1; audit(session, role, "policy.origin.delete", id, origin=item.origin)
 
     @app.post("/api/connections", status_code=201)
     def create_connection(spec: ConnectionSpec, server_id: str | None = Query(default=None), role=Depends(require())):
         data = spec.model_dump()
-        try:
-            validate_connection(data, settings.allowed_origins)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
         with sessions.begin() as session:
             server_id = selected(server_id); server = server_lock(session, server_id)
+            try:
+                validate_connection(data, policy_origins(session, server_id))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
             item = Connection(spec=data, server_id=server_id)
             session.add(item)
             session.flush()
@@ -253,15 +307,15 @@ def create_app(settings=None):
     @app.patch("/api/connections/{id}")
     def update_connection(id: str, spec: ConnectionSpec, server_id: str | None = Query(default=None), if_match: str | None = Header(default=None), role=Depends(require())):
         data = spec.model_dump()
-        try:
-            validate_connection(data, settings.allowed_origins)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
         with sessions.begin() as session:
             server_id = selected(server_id); server = server_lock(session, server_id)
             item = get(session, Connection, id)
             if item.server_id != server_id: raise HTTPException(404, "Record not found")
             revision(item.revision, if_match)
+            try:
+                validate_connection(data, policy_origins(session, server_id))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
             item.spec, item.revision = data, item.revision + 1
             server.revision += 1
             audit(session, role, "connection.update", id)
@@ -356,7 +410,7 @@ def create_app(settings=None):
             revision(tool.revision, if_match)
             conn = get(session, Connection, tool.connection_id)
             try:
-                validate_tool(tool.spec, conn.spec, settings.allowed_origins)
+                validate_tool(tool.spec, conn.spec, policy_origins(session, server_id))
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
             tool.validated_fingerprint = fingerprint(tool.spec, conn.spec)
@@ -377,7 +431,7 @@ def create_app(settings=None):
                 if tool.spec["effect"] == "write" and not request.confirm_write:
                     raise HTTPException(422, "Confirm the live write test explicitly")
                 tool_data = {"id": tool.id, "revision": tool.revision, "spec": {**tool.spec, "enabled": True}, "fingerprint": fp}
-                bundle = compile_bundle([tool_data], {conn.id: conn.spec}, settings.allowed_origins)
+                bundle = compile_bundle([tool_data], {conn.id: conn.spec}, policy_origins(session, server_id))
             started = time.monotonic()
             try:
                 with candidate(bundle, settings) as (url, token, tools):
@@ -421,7 +475,7 @@ def create_app(settings=None):
             tools, connections = snapshot(session, server_id)
             problems = publish_checks(session, tools)
             try:
-                compile_bundle(tools, connections, settings.allowed_origins)
+                compile_bundle(tools, connections, policy_origins(session, server_id))
             except ValueError as exc:
                 problems.append(str(exc))
             active = session.get(Release, server.active_release_id) if server.active_release_id else None
@@ -465,7 +519,7 @@ def create_app(settings=None):
             if problems:
                 raise HTTPException(422, "; ".join(problems))
             try:
-                bundle = compile_bundle(tools, connections, settings.allowed_origins)
+                bundle = compile_bundle(tools, connections, policy_origins(session, server_id))
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
         return enqueue(bundle, request.revision, role, server_id)
@@ -480,7 +534,7 @@ def create_app(settings=None):
                 raise HTTPException(422, "Only a previously verified release can be restored")
             if digest(release.bundle) != release.checksum:
                 raise HTTPException(422, "Stored release checksum mismatch")
-            bundle = compile_bundle(release.bundle["tools"], release.bundle["connections"], settings.allowed_origins)
+            bundle = compile_bundle(release.bundle["tools"], release.bundle["connections"], policy_origins(session, server_id))
         return enqueue(bundle, request.revision, role, server_id)
 
     @app.post("/api/deployments")

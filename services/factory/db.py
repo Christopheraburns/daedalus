@@ -35,6 +35,17 @@ class Connection(Base):
     spec: Mapped[dict] = mapped_column(JSON)
 
 
+class ApiOrigin(Base):
+    __tablename__ = "api_origins"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    server_id: Mapped[str] = mapped_column(ForeignKey("servers.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    origin: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(String(240), default="")
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Tool(Base):
     __tablename__ = "tools"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

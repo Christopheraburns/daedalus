@@ -15,3 +15,4 @@
 .text-button.danger{color:#b95d50}.text-button.danger:hover{color:#8f3f35}
 .canvas-import-button{font-size:10px;padding:6px 9px;color:#087f8c;border-color:#cfe2e2}
 .canvas-import-button{font-size:10px;padding:6px 9px;color:#087f8c;border-color:#cfe2e2}
+.policy-list{border:1px solid #e3eaf0;border-radius:7px;margin:2px 0 20px;overflow:hidden}.policy-row{display:flex;align-items:center;gap:10px;padding:12px;border-bottom:1px solid #edf1f4}.policy-row:last-child{border-bottom:0}.policy-row>div{min-width:0;flex:1}.policy-row strong,.policy-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.policy-row strong{font:11px monospace;color:#496174}.policy-row small{margin-top:4px;color:#94a2ae;font-size:9px}.policy-form{border-top:1px solid #edf1f4;padding-top:18px}

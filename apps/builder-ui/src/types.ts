@@ -2,6 +2,7 @@ export type Parameter = { name: string; location: 'path' | 'query'; type: 'strin
 export type ToolSpec = { name: string; description: string; connection_id: string; method: 'GET' | 'POST'; path: string; parameters: Parameter[]; body_schema: Record<string, unknown> | null; effect: 'read' | 'write'; enabled: boolean };
 export type Tool = ToolSpec & { id: string; revision: number; validated: boolean; tested: boolean; published: boolean; test_summary: { success: boolean; duration_ms: number; tested_at: string } | null };
 export type Connection = { id: string; revision: number; name: string; base_url: string; auth_mode: 'none' };
+export type ApiOrigin = { id: string; server_id: string; revision: number; origin: string; description: string; enabled: boolean; bootstrap?: boolean; created_at?: string };
 export type Release = { id: string; status: string; checksum: string; error: string | null; created_at: string; created_by: string; tool_names: string[] };
 export type Deployment = { id: string; revision: number; status: string; desired_release_id: string | null; deployed_release_id: string | null; application_name: string | null; application_id: string | null; endpoint: string | null; provider: string; message: string | null; metrics: Record<string, unknown>; updated_at: string };
 export type ServerSummary = { id: string; name: string; revision: number; active_release_id: string | null; deployment: Deployment };
