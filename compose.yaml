@@ -1,0 +1,118 @@
+name: daedalus
+
+x-runtime: &runtime
+  image: ${MCP_FACTORY_RUNTIME_IMAGE:-christopheraburns/mcp-factory-runtime:0.1.1}
+  platform: linux/amd64
+  init: true
+  working_dir: /workspace
+  volumes:
+    - .:/workspace:ro
+  entrypoint: /opt/mcp-factory/venv/bin/python
+
+x-environment: &environment
+  PYTHONPATH: /workspace/services
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  DATABASE_URL: postgresql+psycopg://factory:${POSTGRES_PASSWORD:?Run python3 scripts/dev_setup.py}@db:5432/factory
+  # Local-only mode. Every request to the loopback-bound Builder API is an administrator.
+  FACTORY_AUTH_MODE: development-open
+  FACTORY_MCP_TOKEN: ${FACTORY_MCP_TOKEN:?Run python3 scripts/dev_setup.py}
+  FACTORY_ALLOWED_API_ORIGINS: ${FACTORY_ALLOWED_API_ORIGINS:-http://mock-api:8080}
+  FACTORY_BROWSER_ORIGINS: ${FACTORY_BROWSER_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+  FACTORY_PUBLIC_MCP_URL: http://localhost:${FACTORY_LOCAL_MCP_PORT:-8081}/mcp
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: factory
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/dev_setup.py}
+    volumes:
+      - registry:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U factory -d factory"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *runtime
+    environment: *environment
+    command: ["-m", factory.migrate]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *runtime
+    environment:
+      <<: *environment
+      # Optional in development-open mode; required by the Workbench token mode.
+      FACTORY_ADMINISTRATOR_TOKEN: ${FACTORY_ADMINISTRATOR_TOKEN:-}
+      FACTORY_AUTHOR_TOKEN: ${FACTORY_AUTHOR_TOKEN:-}
+      FACTORY_PUBLISHER_TOKEN: ${FACTORY_PUBLISHER_TOKEN:-}
+      FACTORY_VIEWER_TOKEN: ${FACTORY_VIEWER_TOKEN:-}
+    command: ["-m", uvicorn, "factory.api:create_app", --factory, --host, "0.0.0.0", --port, "8000", --reload, --reload-dir, /workspace/services, --no-access-log]
+    ports:
+      - "127.0.0.1:${FACTORY_LOCAL_API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, /opt/mcp-factory/venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  server:
+    <<: *runtime
+    environment:
+      <<: *environment
+      FACTORY_GATEWAY_BIND: "0.0.0.0"
+    command: ["-m", factory.controller]
+    ports:
+      - "127.0.0.1:${FACTORY_LOCAL_MCP_PORT:-8081}:8081"
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-api:
+        condition: service_healthy
+
+  mock-api:
+    <<: *runtime
+    environment:
+      PYTHONPATH: /workspace/services
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["-m", uvicorn, "factory.mock_api:app", --host, "0.0.0.0", --port, "8080", --no-access-log]
+    healthcheck:
+      test: [CMD, /opt/mcp-factory/venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  ui:
+    build:
+      context: apps/builder-ui
+      args:
+        RUNTIME_IMAGE: ${MCP_FACTORY_RUNTIME_IMAGE:-christopheraburns/mcp-factory-runtime:0.1.1}
+    platform: linux/amd64
+    init: true
+    environment:
+      API_PROXY_TARGET: http://api:8000
+      VITE_FACTORY_OPEN_ADMIN: "true"
+    ports:
+      - "127.0.0.1:${FACTORY_LOCAL_UI_PORT:-5173}:5173"
+    volumes:
+      - ./apps/builder-ui:/app
+      - ui-dependencies:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  registry:
+  ui-dependencies:

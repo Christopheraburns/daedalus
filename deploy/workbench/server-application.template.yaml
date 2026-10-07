@@ -1,0 +1,17 @@
+# Rendered by the configured deployment bridge for one dedicated MCP Server Application.
+# Values marked <...> come from the immutable deployment record; do not commit secrets.
+application:
+  name: <application_name>
+  runtime_image: <MCP_FACTORY_RUNTIME_IMAGE>
+  entrypoint: deploy/workbench/launch_server.py
+  environment:
+    FACTORY_SERVER_ID: <server_id>
+    FACTORY_DEPLOYED_RELEASE_ID: <release_id>
+    DATABASE_URL: <external_postgresql_psycopg_url>
+    FACTORY_MCP_TOKEN: <dedicated_server_mcp_token>
+    FACTORY_ALLOWED_API_ORIGINS: <approved_backend_origins>
+    FACTORY_PUBLIC_MCP_URL: <public_mcp_url>
+    FACTORY_AUTH_MODE: development-token
+  health:
+    controller_heartbeat_seconds: 12
+    gateway_admin_binding: 127.0.0.1

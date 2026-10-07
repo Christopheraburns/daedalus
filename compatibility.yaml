@@ -1,5 +1,5 @@
 schema_version: 1
-status: development-foundation
+status: local-builder-verified
 cloudera:
   workbench_version: null # Fill from the deployment.
   base_image: docker.repository.cloudera.com/cloudera/cdsw/ml-runtime-pbj-workbench-python3.12-standard:2026.08.1-b5@sha256:106220420aa35e733fe362a07a0f14af11d2d27f58aa527fa13d931598ef7262
@@ -23,6 +23,7 @@ python_dependencies:
 protocol:
   target_profiles: ['2026-07-28', '2025-11-25']
   verified_profiles: []
+  basic_discovery_smoke_profiles: ['2026-07-28', '2025-11-25']
   normative_schema_commit: null
 validation:
   local_image_build: passed
@@ -33,6 +34,15 @@ validation:
   local_test_date: '2026-10-06'
   target_workbench_registration: pending
   ingress_and_oauth: pending
-  gateway_reload: pending
-  persistence: pending
+  gateway_reload: passed-locally
+  persistence: passed-locally
+  local_backend_tests: '8 passed'
+  local_browser_tests: '4 passed (Chromium)'
+  frontend_production_build: passed
+  single_port_builder: passed-locally
+  rollback_and_failed_release_recovery: passed-locally
+  docker_recreation_persistence: passed
+  multi_server_workspace_isolation: passed-locally
+  manual_dedicated_application_lifecycle: passed-locally
+  cloudera_deployment_bridge: implemented-unqualified
   sbom_and_vulnerability_scan: pending
