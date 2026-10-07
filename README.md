@@ -108,6 +108,14 @@ server in the same Workbench project. A dedicated Server application must set
 Use [the Server Application template](deploy/workbench/server-application.template.yaml)
 to configure its runtime, launcher, registry access, and endpoint.
 
+For the Builder application, set the Workbench application script to the
+repository-root `app.py`. It delegates to `deploy/workbench/launch_builder.py`,
+uses the `CDSW_APP_PORT` supplied by Workbench, and serves the built UI and
+management API. Each generated MCP Server is a separate application; use
+`mcp_server_app.py` or the rendered `deploy/workbench/launch_server.py` launcher
+for that application, with its own `FACTORY_SERVER_ID`, release, database, and
+MCP token settings.
+
 Create the applications using these scripts:
 
 - Builder: `deploy/workbench/launch_builder.py` serves the built UI and management
