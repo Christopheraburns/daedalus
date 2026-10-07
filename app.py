@@ -3,4 +3,12 @@ from pathlib import Path
 import runpy
 
 
-runpy.run_path(str(Path(__file__).parent / "deploy" / "workbench" / "launch_builder.py"), run_name="__main__")
+def project_root():
+    current = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+    for candidate in (current, *current.parents):
+        if (candidate / "deploy" / "workbench" / "launch_builder.py").is_file():
+            return candidate
+    raise RuntimeError("Run app.py from the Daedalus project root")
+
+
+runpy.run_path(str(project_root() / "deploy" / "workbench" / "launch_builder.py"), run_name="__main__")
