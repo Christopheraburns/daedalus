@@ -40,6 +40,7 @@ def main():
         "node": ["node", "--version"],
         "npm": ["npm", "--version"],
         "ruff": ["/opt/mcp-factory/venv/bin/ruff", "--version"],
+        "postgres": ["/usr/lib/postgresql/16/bin/postgres", "--version"],
     }
     result = {"python": sys.version.split()[0], "mcp_sdk": version("mcp")}
     for name, command in commands.items():

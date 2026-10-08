@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVER_ID = "85d30f87-b285-4d17-a89e-84bac6ac37bc"
@@ -8,9 +9,19 @@ MODERN = "2026-07-28"
 LEGACY = "2025-11-25"
 
 
+def database_url():
+    """DATABASE_URL, else the project PostgreSQL published by deploy/workbench/launch_postgres.py."""
+    if os.getenv("DATABASE_URL"):
+        return os.environ["DATABASE_URL"]
+    host_file = Path(os.getenv("FACTORY_PG_HOST_FILE", Path.home() / ".daedalus/postgres-host"))
+    if not host_file.is_file() or not os.getenv("FACTORY_PG_PASSWORD"):
+        raise RuntimeError("Set DATABASE_URL, or start the PostgreSQL application and set FACTORY_PG_PASSWORD")
+    return f"postgresql+psycopg://factory:{quote(os.environ['FACTORY_PG_PASSWORD'], safe='')}@{host_file.read_text().strip()}/factory"
+
+
 @dataclass
 class Settings:
-    database_url: str = field(default_factory=lambda: os.environ["DATABASE_URL"])
+    database_url: str = field(default_factory=database_url)
     auth_mode: str = field(default_factory=lambda: os.getenv("FACTORY_AUTH_MODE", ""))
     allowed_origins: list[str] = field(default_factory=lambda: os.getenv("FACTORY_ALLOWED_API_ORIGINS", "").split(","))
     browser_origins: list[str] = field(default_factory=lambda: os.getenv("FACTORY_BROWSER_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(","))

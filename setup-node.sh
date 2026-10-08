@@ -4,7 +4,11 @@
 # Source this file so PATH is updated in the current shell:
 #   source ./setup-node.sh
 
-set -euo pipefail
+# Strict mode only when executed; when sourced it would leak into the caller's
+# shell and close the session on the next failing command.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  set -euo pipefail
+fi
 
 NODE_HOME="${NODE_HOME:-/home/cdsw/node/}"
 USER_BIN="${HOME}/.local/bin"

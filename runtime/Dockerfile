@@ -23,10 +23,11 @@ RUN test "${TARGETARCH}" = amd64 \
     && python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), "Select a Python 3.12 Cloudera runtime"' \
     && . /etc/os-release && test "${ID}" = ubuntu
 
-# Development tools for Python/TypeScript work; no nested Docker or local database.
+# Development tools for Python/TypeScript work; no nested Docker. The PostgreSQL server is
+# only started by deploy/workbench/launch_postgres.py, as cdsw, with data in project storage.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential libpq-dev xz-utils \
+        ca-certificates curl git build-essential libpq-dev xz-utils postgresql-16 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/mcp-factory/bin /opt/mcp-factory/node /opt/mcp-factory/licenses \

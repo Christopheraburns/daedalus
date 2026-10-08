@@ -102,6 +102,26 @@ authentication mode: local Compose uses `development-open`; Workbench must use
 `development-token` until production identity integration is implemented.
 The Docker-only hostname `mock-api` will not exist in Workbench.
 
+### PostgreSQL inside the Workbench project
+
+When no external PostgreSQL is available, host the registry in a third
+application. This needs a runtime built from the current `runtime/Dockerfile`
+(it adds the PostgreSQL 16 server) and direct pod-to-pod networking in the
+cluster.
+
+1. Set `FACTORY_PG_PASSWORD` (16+ characters) as a project environment variable
+   and leave `DATABASE_URL` unset.
+2. Create an application with the script `postgres_app.py` and start it first.
+   It initializes the data directory in project storage (`~/.daedalus/postgres`)
+   and writes its current `IP:port` to `~/.daedalus/postgres-host`.
+3. Run the migration command above, then start the Builder and Server
+   applications. They read that file to build their database URL.
+
+The pod IP changes whenever the PostgreSQL application restarts, so restart the
+Builder and Server applications after it. Connections are password-protected
+but not encrypted, and the data lives on network project storage: use this for
+evaluation, not production.
+
 Create one Builder application and one Server application for each deployed MCP
 server in the same Workbench project. A dedicated Server application must set
 `FACTORY_SERVER_ID` to the workspace ID shown in the Builder's server picker.
