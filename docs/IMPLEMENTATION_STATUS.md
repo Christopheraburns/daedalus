@@ -74,6 +74,8 @@ limited to the behaviors listed, not exhaustive conformance.
 | Cloudera deployment bridge adapter | Implemented | Explicit `cloudera-bridge` integration point sends a versioned, authenticated request; the installed Workbench control-plane contract is not yet qualified. |
 | Python tool packs and executor | Verified locally | `kind: python` tools compile into an executor OpenAPI target; tests cover pack validation, key enforcement, gateway serving under both protocol profiles, Builder test/publish flow, and controller executor switching and retirement across releases. Builder palette lists packs with click/drag creation, Add all, inspector for Python tools, and a prefilled playground. |
 | Project packs authored in the browser | Verified locally | Administrators create, edit, view and delete project packs from the Builder; saves are validated in an isolated subprocess (syntax, decorator, parameter types, hostile exit), catalogued without restart, snapshotted into releases, and pack edits invalidate tool test evidence. Backend and browser tests cover the flow. |
+| In-app help | Verified locally | Tool-pack how-to guide served at `/help/tool-packs.html` (English and Korean), linked from the header, pack editor and palette; browser test checks both the dev server and the application port. |
+| English and Korean UI | Implemented | 274 UI strings plus ~60 backend messages translated; language selector in the header with per-browser persistence and browser-language default; browser test switches languages. Korean wording awaits native review. |
 
 ## Acceptance evidence
 

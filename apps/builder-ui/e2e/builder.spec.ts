@@ -260,3 +260,32 @@ test('administrators write a project pack in the browser and use its tools', asy
   }
   expect((await page.request.delete(`http://127.0.0.1:18000/api/packs/${packName}`, { headers })).ok()).toBeTruthy();
 });
+
+test('the help link opens the tool pack guide from both the dev server and the application port', async ({ page }) => {
+  await login(page);
+  const link = page.getByRole('link', { name: 'Help', exact: true });
+  await expect(link).toHaveAttribute('href', '/help/tool-packs.html');
+  for (const origin of ['http://127.0.0.1:15173', 'http://127.0.0.1:18000']) {
+    const response = await page.request.get(`${origin}/help/tool-packs.html`);
+    expect(response.ok()).toBeTruthy();
+    expect(await response.text()).toContain('Writing a tool pack');
+  }
+});
+
+test('the language selector switches the Builder to Korean and back', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('ko');
+  await expect(page.getByRole('button', { name: '검토 및 게시' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '도움말' })).toHaveAttribute('href', '/help/ko/tool-packs.html');
+  await expect(page.locator('.palette')).toContainText('도구 팩');
+  await page.reload();
+  await expect(page.getByRole('button', { name: '검토 및 게시' })).toBeVisible(); // remembered per browser
+  const korean = await page.request.get('http://127.0.0.1:18000/help/ko/tool-packs.html');
+  expect(korean.ok()).toBeTruthy();
+  expect(await korean.text()).toContain('도구 팩 작성하기');
+  await page.getByRole('combobox', { name: '언어' }).selectOption('en');
+  await expect(page.getByRole('button', { name: 'Review & publish' })).toBeVisible();
+  expect(errors).toEqual([]);
+});

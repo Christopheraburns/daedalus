@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Writing a tool pack · Daedalus help</title>
+<style>
+  :root { --ink: #1d2733; --muted: #6b7786; --teal: #087f8c; --border: #e3e8ec; --code-bg: #f4f6f8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--ink); background: #fff; }
+  header { border-bottom: 1px solid var(--border); padding: 18px 28px; display: flex; align-items: center; gap: 14px; }
+  header .brand { font-weight: 750; font-size: 20px; letter-spacing: -.6px; }
+  header .brand span { color: var(--teal); }
+  header nav { margin-left: auto; font-size: 13px; }
+  header nav a { color: var(--teal); text-decoration: none; margin-left: 18px; }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 28px 80px; }
+  h1 { font-size: 30px; letter-spacing: -.8px; margin: 0 0 6px; }
+  h2 { font-size: 20px; margin: 44px 0 10px; letter-spacing: -.3px; }
+  h3 { font-size: 15px; margin: 26px 0 6px; }
+  p.lede { color: var(--muted); font-size: 16px; margin-top: 0; }
+  code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12.5px; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 10px 0 18px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 12px; letter-spacing: .6px; color: var(--muted); text-transform: uppercase; }
+  ol li, ul li { margin: 5px 0; }
+  .note { border-left: 3px solid var(--teal); background: #f1f8f8; padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 16px 0; }
+  .warn { border-left-color: #c9962e; background: #fcf6e8; }
+  .toc { background: var(--code-bg); border-radius: 8px; padding: 12px 18px; font-size: 14px; }
+  .toc a { color: var(--teal); text-decoration: none; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 60px; border-top: 1px solid var(--border); padding-top: 14px; }
+</style>
+</head>
+<body>
+<header><span class="brand">daedalus<span>.</span></span><span style="color:var(--muted)">Help</span><nav><a href="/help/ko/tool-packs.html" lang="ko">한국어</a><a href="/">Back to the Builder</a></nav></header>
+<main>
+<h1>Writing a tool pack</h1>
+<p class="lede">A tool pack is a small Python file that turns functions into MCP tools your agents can call. This guide shows how to write one in the Builder, test it, and publish it, without leaving the browser.</p>
+
+<div class="toc">
+<strong>On this page</strong><br>
+<a href="#what">What a pack is</a> ·
+<a href="#steps">Create a pack in the Builder</a> ·
+<a href="#anatomy">Anatomy of a tool</a> ·
+<a href="#context">The ToolContext</a> ·
+<a href="#rules">Rules and limits</a> ·
+<a href="#examples">Examples</a> ·
+<a href="#lifecycle">Testing, publishing and editing</a> ·
+<a href="#errors">Common validation errors</a>
+</div>
+
+<h2 id="what">What a pack is</h2>
+<p>Daedalus builds MCP servers from <strong>tools</strong>. A <em>REST tool</em> maps one API operation and needs no code. A <em>pack tool</em> is a Python function for everything else: combining several calls, computing a result, shaping a response, or talking to a system that is not a simple REST endpoint.</p>
+<p>Functions live in a <strong>pack</strong>, one Python module. Packs come from two places:</p>
+<table>
+<tr><th>Origin</th><th>Where it lives</th><th>Who can change it</th></tr>
+<tr><td>Built-in</td><td>Inside the runtime image (for example the <code>demo</code> pack)</td><td>Nobody from the Builder; it changes with the image</td></tr>
+<tr><td>Project</td><td>A file in the project's storage, written from the Builder</td><td>Administrators, from the pack editor</td></tr>
+</table>
+<p>Both appear in the <strong>TOOL PACKS</strong> section of the building-blocks panel. Anyone can read their code with <strong>View code</strong>.</p>
+
+<h2 id="steps">Create a pack in the Builder</h2>
+<ol>
+<li>Sign in as an <strong>administrator</strong>. Authors and publishers can use packs but not write them.</li>
+<li>In the left panel, next to <strong>TOOL PACKS</strong>, click <strong>+</strong>. The editor opens with a working template.</li>
+<li>Give the pack a <strong>name</strong>: lowercase letters, digits and underscores, starting with a letter (for example <code>hdfs_files</code>). The name cannot be changed later.</li>
+<li>Write your functions (see <a href="#anatomy">Anatomy of a tool</a>) and click <strong>Save pack</strong>. Daedalus imports the file in an isolated process and reports any problem with a line number. Nothing is saved until the file is valid.</li>
+<li>The pack now appears in the panel with its tools. Click a tool, or drag it onto the canvas, to create a tool record. <strong>Add all</strong> creates one record per function.</li>
+<li>Select the tool, click <strong>Test tool</strong>, adjust the sample arguments and run it. Then <strong>Review &amp; publish</strong> as with any tool.</li>
+</ol>
+<div class="note">No restart is involved at any point. Saving a pack updates the palette immediately; publishing a release starts the code on the server.</div>
+
+<h2 id="anatomy">Anatomy of a tool</h2>
+<pre><code>"""One line describing the pack. It is shown in the palette."""
+from factory.packs import ToolContext, pack_tool
+
+
+@pack_tool(effect="read", requires_connection=False)
+def hello(ctx: ToolContext, name: str, excited: bool = False) -&gt; dict:
+    """Greet someone by name. Use when the user asks for a greeting."""
+    greeting = f"Hello, {name}" + ("!" if excited else ".")
+    return {"greeting": greeting, "user": ctx.caller.username}
+</code></pre>
+<table>
+<tr><th>Part</th><th>Becomes</th><th>Rules</th></tr>
+<tr><td>Module docstring</td><td>The pack description in the palette</td><td>Optional but recommended</td></tr>
+<tr><td><code>@pack_tool(...)</code></td><td>Marks the function as a tool</td><td>Required. <code>effect</code> is <code>"read"</code> or <code>"write"</code>; <code>requires_connection</code> is <code>True</code> when the tool calls an API connection</td></tr>
+<tr><td>Function name</td><td>The default tool name</td><td>A valid Python identifier; the tool record's name can be changed afterwards</td></tr>
+<tr><td>First parameter <code>ctx</code></td><td>The <a href="#context">ToolContext</a></td><td>Must be named <code>ctx</code>. It is never part of the tool's inputs</td></tr>
+<tr><td>Other parameters</td><td>The tool's input schema</td><td>Annotated <code>str</code>, <code>int</code>, <code>float</code> or <code>bool</code>. A default value makes the input optional</td></tr>
+<tr><td>Function docstring</td><td>The tool description agents read</td><td>Required. Say what the tool does and when to use it</td></tr>
+<tr><td>Return value</td><td>The structured result</td><td>Anything JSON-serialisable; a <code>dict</code> is best</td></tr>
+</table>
+<div class="note">Agents send inputs nested under <code>body</code>: calling <code>hello</code> looks like <code>{"body": {"name": "Ada"}}</code>. The playground prefills this shape for you.</div>
+
+<h2 id="context">The ToolContext</h2>
+<p>Every call receives <code>ctx</code>. Tools never read headers, tokens or environment variables themselves; the context carries what they are allowed to know.</p>
+<table>
+<tr><th>Member</th><th>Meaning</th></tr>
+<tr><td><code>ctx.caller.username</code></td><td>The user the server is acting for on this request. In local development it is <code>development</code>; in production it is the verified identity from the caller's token.</td></tr>
+<tr><td><code>ctx.caller.token</code></td><td>The caller's credential when the connection forwards it, otherwise <code>None</code>. Do not log it.</td></tr>
+<tr><td><code>ctx.connection</code></td><td>The tool's connection record (<code>name</code>, <code>base_url</code>, <code>auth_mode</code>), or <code>None</code> for tools without one.</td></tr>
+<tr><td><code>ctx.client(timeout=10.0)</code></td><td>An <code>httpx.Client</code> bound to the connection's approved base URL, with the connection's authentication applied. Use it for every API call; it is the only path that respects the server's origin policy.</td></tr>
+<tr><td><code>ctx.config</code></td><td>The JSON object from the tool's <strong>Configuration</strong> field in the inspector, for per-tool settings such as a root path or a page size.</td></tr>
+</table>
+
+<h2 id="rules">Rules and limits</h2>
+<ul>
+<li><strong>Imports.</strong> The standard library plus the libraries in the runtime image, notably <code>httpx</code>, <code>pydantic</code>, <code>yaml</code> and <code>jsonschema</code>. There is no <code>pip install</code>; ask for other libraries to be added to the image.</li>
+<li><strong>Time.</strong> A tool must finish within 8 seconds or the gateway reports a timeout to the agent. Long work belongs in smaller tools or a background system.</li>
+<li><strong>Size.</strong> A pack file is at most 64 KiB. A result is at most 1 MiB; keep results small, because agents read all of it.</li>
+<li><strong>Errors.</strong> Raise <code>ValueError("message")</code> for problems the agent can fix (bad path, missing permission). The agent receives <code>{"error": "message"}</code>. Any other exception is reported as an internal failure with its type.</li>
+<li><strong>Network.</strong> Call APIs through <code>ctx.client()</code> so the connection's approved origin and authentication apply. Code that opens its own connections bypasses those policies, and reviewers should treat that as a defect.</li>
+<li><strong>Side effects.</strong> Declare <code>effect="write"</code> for anything that creates, changes or deletes data. Write tools require explicit confirmation before a live test.</li>
+<li><strong>Determinism.</strong> Module-level code runs once when the server starts. Keep it to imports and constants; do not open connections or read files at import time.</li>
+<li><strong>Trust.</strong> Pack code runs inside the Server application with its permissions. That is why only administrators can write packs and why every save is recorded in the audit log.</li>
+</ul>
+
+<h2 id="examples">Examples</h2>
+<h3>Call an API and shape the result</h3>
+<pre><code>@pack_tool(effect="read", requires_connection=True)
+def open_tickets(ctx: ToolContext, customer_id: str, limit: int = 10) -&gt; dict:
+    """List a customer's open support tickets, newest first."""
+    with ctx.client() as client:
+        response = client.get(f"/customers/{customer_id}/tickets", params={"status": "open"})
+        response.raise_for_status()
+        tickets = response.json()
+    tickets.sort(key=lambda t: t["created_at"], reverse=True)
+    return {"tickets": [{"id": t["id"], "title": t["title"]} for t in tickets[:limit]], "total": len(tickets)}
+</code></pre>
+
+<h3>Combine two calls</h3>
+<pre><code>@pack_tool(effect="read", requires_connection=True)
+def order_summary(ctx: ToolContext, order_id: str) -&gt; dict:
+    """Return an order together with its shipment status."""
+    with ctx.client() as client:
+        order = client.get(f"/orders/{order_id}")
+        if order.status_code == 404:
+            raise ValueError(f"Order {order_id} does not exist")
+        order.raise_for_status()
+        shipment = client.get(f"/shipments", params={"order": order_id}).json()
+    return {"order": order.json(), "shipment": shipment[0] if shipment else None}
+</code></pre>
+
+<h3>Use per-tool configuration and the caller</h3>
+<pre><code>@pack_tool(effect="write", requires_connection=True)
+def create_note(ctx: ToolContext, text: str) -&gt; dict:
+    """Record a note in the folder configured for this tool."""
+    folder = ctx.config.get("folder", "/notes")
+    with ctx.client() as client:
+        response = client.post(f"{folder}", json={"text": text, "author": ctx.caller.username})
+        response.raise_for_status()
+    return {"created": response.json()["id"], "folder": folder}
+</code></pre>
+<p>Set the folder in the inspector's <strong>Configuration (JSON)</strong> field: <code>{"folder": "/notes/sales"}</code>. The same function can back several tools with different configuration.</p>
+
+<h2 id="lifecycle">Testing, publishing and editing</h2>
+<ul>
+<li><strong>Test</strong> runs the tool through a private copy of the gateway and executor, so a draft never touches the live server. The result shown is exactly what an agent would receive.</li>
+<li><strong>Publish</strong> snapshots the pack source into the release. The live server then runs that snapshot.</li>
+<li><strong>Editing a pack later</strong> does not change any published server. Tools that use the pack lose their <em>Tested</em> status; test and publish them again to roll the new code out. Releases can be restored, snapshot included.</li>
+<li><strong>Deleting a pack</strong> is refused while any tool still uses it. Remove or reassign those tools first.</li>
+</ul>
+
+<h2 id="errors">Common validation errors</h2>
+<table>
+<tr><th>Message</th><th>Fix</th></tr>
+<tr><td><code>invalid syntax (name.py, line N)</code></td><td>Python syntax error at that line.</td></tr>
+<tr><td><code>the first parameter must be ctx</code></td><td>Make <code>ctx: ToolContext</code> the first parameter of the decorated function.</td></tr>
+<tr><td><code>parameter X must be a str, int, float or bool</code></td><td>Annotate every input with one of those four types. Pass lists or objects as JSON text in a <code>str</code> and parse it in the function.</td></tr>
+<tr><td><code>add a docstring; it becomes the tool description</code></td><td>Write a docstring that explains when an agent should use the tool.</td></tr>
+<tr><td><code>Define at least one function decorated with @pack_tool</code></td><td>The file imported but declares no tools.</td></tr>
+<tr><td><code>Pack import did not finish within 15 seconds</code></td><td>Module-level code is doing work at import time. Move it into the functions.</td></tr>
+<tr><td><code>X requires a connection</code> (when creating a tool)</td><td>The function has <code>requires_connection=True</code>; choose a connection in the inspector or add one first.</td></tr>
+<tr><td><code>X is a read tool; set the matching side effect</code></td><td>The tool record's side-effect setting must match the decorator's <code>effect</code>.</td></tr>
+</table>
+
+<footer>Daedalus Builder help · Tool packs. Built-in packs are documented by their own code: open <strong>View code</strong> on the <code>demo</code> pack for a complete, working reference.</footer>
+</main>
+</body>
+</html>

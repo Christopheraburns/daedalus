@@ -629,6 +629,9 @@ def create_app(settings=None):
 
     if (settings.ui_dir / "assets").exists():
         app.mount("/assets", StaticFiles(directory=settings.ui_dir / "assets"), name="assets")
+    if (settings.ui_dir / "help").exists():
+        # In-app help pages shipped with the UI build (apps/builder-ui/public/help).
+        app.mount("/help", StaticFiles(directory=settings.ui_dir / "help", html=True), name="help")
 
     @app.get("/")
     def index():

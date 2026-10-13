@@ -155,6 +155,17 @@ binding; verify the deployment's ingress requirements before overriding
 only. Actual Workbench ingress, registration, authentication, and MCP protocol
 qualification remain unverified; see [compatibility.yaml](compatibility.yaml).
 
+## Languages
+
+The Builder is available in English and Korean. The selector next to the signed-in
+user switches languages and remembers the choice per browser; the default follows
+the browser language. Strings live in
+[apps/builder-ui/src/locales](apps/builder-ui/src/locales): `en.ts` is the key
+list, `ko.ts` must define every key (TypeScript enforces this), and `errors.ts`
+translates backend messages by exact text or pattern. Help pages are per language
+under `apps/builder-ui/public/help/`. Tool names, descriptions and pack docstrings
+are user content and stay in whatever language they are written in.
+
 ## Python tool packs
 
 Tools that need more than one API call, binary data, or computation are Python
@@ -171,7 +182,10 @@ applications), validated in an isolated subprocess on save, and visible in the
 palette immediately: no push, image rebuild or application restart. Every release
 snapshots the project pack code it uses, so editing a pack later invalidates test
 evidence for its tools but never changes a published server. Anyone can view pack
-and tool source from the palette or the inspector.
+and tool source from the palette or the inspector. The in-app guide for writing
+packs is served at `/help/tool-packs.html` (source:
+[apps/builder-ui/public/help/tool-packs.html](apps/builder-ui/public/help/tool-packs.html))
+and linked from the Builder's header and the pack editor.
 
 Each release that contains Python tools starts an *executor*: a loopback HTTP
 service (`factory.executor`) that the Server controller supervises next to the
