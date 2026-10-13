@@ -155,6 +155,33 @@ binding; verify the deployment's ingress requirements before overriding
 only. Actual Workbench ingress, registration, authentication, and MCP protocol
 qualification remain unverified; see [compatibility.yaml](compatibility.yaml).
 
+## Python tool packs
+
+Tools that need more than one API call, binary data, or computation are Python
+functions in a *pack* under `services/factory/packs/`. A tool record with
+`kind: python` names the pack and function; the function's typed parameters become
+the MCP input schema and its docstring the description. `GET /api/packs` lists what
+is available. The `demo` pack (`echo`, `whoami`, `fetch_json`) exercises the path.
+
+Packs come from two places. *Built-in* packs ship in the runtime image and are
+read-only. *Project* packs are written by administrators in the Builder (TOOL
+PACKS → +), stored as files under `FACTORY_PACKS_DIR` (default
+`~/daedalus-packs`, which Workbench shares between the Builder and Server
+applications), validated in an isolated subprocess on save, and visible in the
+palette immediately: no push, image rebuild or application restart. Every release
+snapshots the project pack code it uses, so editing a pack later invalidates test
+evidence for its tools but never changes a published server. Anyone can view pack
+and tool source from the palette or the inspector.
+
+Each release that contains Python tools starts an *executor*: a loopback HTTP
+service (`factory.executor`) that the Server controller supervises next to the
+gateway and swaps atomically between releases. agentgateway reaches it as an
+OpenAPI target with a per-process key, so Python tools get the same discovery,
+protocol handling, argument shape (`body` for JSON inputs) and verification as HTTP
+tools. Tool code receives the caller identity and connection through a
+`ToolContext` and never reads headers or credentials itself; registry credentials
+and management tokens are withheld from the executor process.
+
 ## Current scope
 
 This is a local evaluation implementation: one server, reusable unauthenticated

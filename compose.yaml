@@ -46,6 +46,11 @@ services:
 
   api:
     <<: *runtime
+    volumes:
+      - .:/workspace:ro
+      # Project tool packs written from the Builder; Workbench shares /home/cdsw between applications.
+      # A bind mount keeps the directory writable by the cdsw user, unlike a root-initialised named volume.
+      - ${FACTORY_LOCAL_PACKS_DIR:-./.project-packs}:/home/cdsw/daedalus-packs
     environment:
       <<: *environment
       # Optional in development-open mode; required by the Workbench token mode.
@@ -69,6 +74,11 @@ services:
 
   server:
     <<: *runtime
+    volumes:
+      - .:/workspace:ro
+      # Project tool packs written from the Builder; Workbench shares /home/cdsw between applications.
+      # A bind mount keeps the directory writable by the cdsw user, unlike a root-initialised named volume.
+      - ${FACTORY_LOCAL_PACKS_DIR:-./.project-packs}:/home/cdsw/daedalus-packs
     environment:
       <<: *environment
       FACTORY_GATEWAY_BIND: "0.0.0.0"

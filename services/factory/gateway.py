@@ -7,22 +7,36 @@ import secrets
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 from jsonschema import Draft202012Validator
 
-from .compiler import canonical
+from .compiler import canonical, executor_schema
 from .settings import LEGACY, MODERN, ROOT
 
 MAX_RESPONSE = 1024 * 1024
+# Shared secret between the gateway target policy and the loopback executor.
+KEY_HEADER = "x-daedalus-executor-key"
+USER_HEADER = "x-daedalus-user"
+TOKEN_HEADER = "x-daedalus-caller-token"
 
 
 class GatewayError(ValueError):
     pass
+
+
+@dataclass
+class Executor:
+    process: subprocess.Popen
+    port: int
+    key: str
+    directory: Path
 
 
 def rpc(url, token, method, params=None, version=MODERN):
@@ -89,14 +103,30 @@ def catalog(url, token, version=MODERN):
     return sorted(result.get("tools", []), key=lambda t: t["name"])
 
 
+def openapi_target_names(bundle, release_id):
+    return [f"r-{release_id.replace('-', '')}-{i}" for i, _ in enumerate(bundle["targets"])]
+
+
+def executor_target_name(release_id):
+    return f"r-{release_id.replace('-', '')}-py"
+
+
 def target_names(bundle, release_id):
-    return [f"r-{release_id.replace('-', '')}-{i}" for i, _ in enumerate(bundle["targets"])] or [f"r-{release_id.replace('-', '')}-empty"]
+    names = openapi_target_names(bundle, release_id)
+    if bundle.get("python_tools"):
+        names.append(executor_target_name(release_id))
+    return names or [f"r-{release_id.replace('-', '')}-empty"]
 
 
-def gateway_config(bundle, release_id, settings, port=None, admin_port=15000, host=None, token=None):
+def gateway_config(bundle, release_id, settings, port=None, admin_port=15000, host=None, token=None, executor=None):
     targets = []
-    for name, target in zip(target_names(bundle, release_id), bundle["targets"]):
+    for name, target in zip(openapi_target_names(bundle, release_id), bundle["targets"]):
         targets.append({"name": name, "openapi": {"host": target["host"], "schema": canonical(target["schema"])}})
+    if bundle.get("python_tools"):
+        if executor is None:
+            raise GatewayError("Python tools require a running executor")
+        targets.append({"name": executor_target_name(release_id), "openapi": {"host": f"http://127.0.0.1:{executor.port}", "schema": canonical(executor_schema(bundle["python_tools"]))},
+            "policies": {"requestHeaderModifier": {"set": {KEY_HEADER: executor.key}}}})
     if not targets:
         targets = [{"name": target_names(bundle, release_id)[0], "openapi": {"host": "http://127.0.0.1:9", "schema": canonical({"openapi": "3.0.3", "info": {"title": "Empty server", "version": "1"}, "servers": [{"url": "/"}], "paths": {}})}}]
     origin_rule = '!("origin" in request.headers) || request.headers["origin"] in ' + canonical(settings.browser_origins)
@@ -144,6 +174,34 @@ def available_port():
         return sock.getsockname()[1]
 
 
+def start_executor(bundle, directory, port=None, log=None):
+    """Start the loopback executor for a bundle and wait until it is healthy.
+
+    Registry credentials and management tokens are withheld from tool code; only
+    FACTORY_EXECUTOR_* and FACTORY_PACK_* settings pass through.
+    """
+    port = port or available_port()
+    key = secrets.token_urlsafe(32)
+    path = Path(directory) / "executor-bundle.json"
+    path.write_text(canonical(bundle))
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("FACTORY_", "DATABASE_", "POSTGRES_")) or k.startswith(("FACTORY_EXECUTOR_", "FACTORY_PACK_"))}
+    env.update(FACTORY_EXECUTOR_KEY=key, PYTHONPATH=str(ROOT / "services"))
+    process = subprocess.Popen([sys.executable, "-m", "factory.executor", "--bundle", str(path), "--port", str(port)], env=env, stdout=log, stderr=log, start_new_session=True)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise GatewayError("Executor exited during startup; see its log")
+        try:
+            with httpx.Client(timeout=2, trust_env=False) as client:
+                if client.get(f"http://127.0.0.1:{port}/healthz").status_code == 200:
+                    return Executor(process, port, key, Path(directory))
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.2)
+    stop_process(process)
+    raise GatewayError("Executor did not become ready within 20 seconds")
+
+
 def wait_catalog(url, token, process, expected_names, timeout=15):
     deadline = time.monotonic() + timeout
     last_error = "Gateway not ready"
@@ -168,11 +226,18 @@ def candidate(bundle, settings):
         while admin == port:
             admin = available_port()
         token = secrets.token_urlsafe(32)
-        config = gateway_config(bundle, "candidate", settings, port, admin, "127.0.0.1", token)
         path = Path(directory) / "gateway.json"
-        validate_config(config, settings, path)
         with (Path(directory) / "gateway.log").open("w") as log:
-            process = subprocess.Popen([settings.gateway_binary, "-f", str(path)], stdout=log, stderr=log, start_new_session=True)
+            # The gateway fails closed if a target is unreachable at startup, so the executor comes first.
+            executor = start_executor(bundle, directory, log=log) if bundle.get("python_tools") else None
+            config = gateway_config(bundle, "candidate", settings, port, admin, "127.0.0.1", token, executor)
+            try:
+                validate_config(config, settings, path)
+                process = subprocess.Popen([settings.gateway_binary, "-f", str(path)], stdout=log, stderr=log, start_new_session=True)
+            except BaseException:
+                if executor:
+                    stop_process(executor.process)
+                raise
             try:
                 url = f"http://127.0.0.1:{port}/mcp"
                 tools = wait_catalog(url, token, process, [t["spec"]["name"] for t in bundle["tools"]])
@@ -183,15 +248,19 @@ def candidate(bundle, settings):
                 yield url, token, tools
             finally:
                 stop_process(process)
+                if executor:
+                    stop_process(executor.process)
 
 
-def verify_effective(bundle, release_id, settings, process, expected_catalog):
+def verify_effective(bundle, release_id, settings, process, expected_catalog, executor=None):
     url = f"http://127.0.0.1:{settings.gateway_port}/mcp"
     names = set(target_names(bundle, release_id))
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise GatewayError("Gateway exited during release activation")
+        if executor and executor.process.poll() is not None:
+            raise GatewayError("Executor exited during release activation")
         try:
             with httpx.Client(timeout=3, trust_env=False) as client:
                 response = client.get("http://127.0.0.1:15000/config_dump")

@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Contract(BaseModel):
@@ -21,6 +21,10 @@ class ApiOriginSpec(Contract):
 
 class ServerSpec(Contract):
     name: str = Field(min_length=1, max_length=80)
+
+
+class PackSource(Contract):
+    source: str = Field(min_length=1, max_length=65536)
 
 
 class OpenAPIImportRequest(Contract):
@@ -46,13 +50,29 @@ class Parameter(Contract):
 class ToolSpec(Contract):
     name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_]*$", max_length=64)
     description: str = Field(default="", max_length=2000)
-    connection_id: str
+    # http: one declarative API operation served by agentgateway. python: a pack
+    # function served by the executor; a connection is optional for it.
+    kind: Literal["http", "python"] = "http"
+    connection_id: str | None = None
     method: Literal["GET", "POST"] = "GET"
     path: str = Field(default="/", max_length=300)
     parameters: list[Parameter] = Field(default_factory=list, max_length=30)
     body_schema: dict | None = None
+    pack: str = Field(default="", max_length=40)
+    function: str = Field(default="", max_length=64)
+    config: dict = Field(default_factory=dict)
     effect: Literal["read", "write"] = "read"
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def check_kind(self):
+        if self.kind == "http" and not self.connection_id:
+            raise ValueError("HTTP tools require a connection")
+        if self.kind == "python" and not (self.pack and self.function):
+            raise ValueError("Python tools require a pack and a function")
+        if len(str(self.config)) > 4000:
+            raise ValueError("Tool configuration exceeds 4000 characters")
+        return self
 
 
 class Position(Contract):

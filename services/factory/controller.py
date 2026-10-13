@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -13,10 +14,25 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .compiler import compile_bundle, digest
 from .db import ApiOrigin, Release, Server, audit, database, now
-from .gateway import candidate, gateway_config, stop_process, validate_config, verify_effective, write_atomic
+from .gateway import candidate, gateway_config, start_executor, stop_process, validate_config, verify_effective, write_atomic
 from .settings import LEGACY, MODERN, Settings
 
 log = logging.getLogger("factory.controller")
+
+
+def launch_executor(bundle, settings, release_id):
+    """The release's Python tools, or None when it has none; one directory per release."""
+    if not bundle.get("python_tools"):
+        return None
+    directory = settings.state_dir / "executors" / release_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return start_executor(bundle, directory)
+
+
+def retire_executor(executor):
+    if executor:
+        stop_process(executor.process)
+        shutil.rmtree(executor.directory, ignore_errors=True)
 
 
 def main():
@@ -31,7 +47,7 @@ def main():
     os.chmod(settings.state_dir, 0o700)
     config_path = settings.state_dir / "gateway.json"
     empty = compile_bundle([], {}, settings.allowed_origins)
-    process = None
+    process = executor = None
     # Connection-scoped lock prevents two Server instances writing the same server.
     with engine.connect() as owner:
         if not owner.scalar(text("SELECT pg_try_advisory_lock(hashtext(current_schema()), hashtext(:server_id))"), {"server_id": server_id}):
@@ -50,15 +66,18 @@ def main():
             # Revalidate approved origins at every startup, including saved releases.
             approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
             compile_bundle(bundle["tools"], bundle["connections"], approved)
-        config = gateway_config(bundle, release_id, settings)
-        validate_config(config, settings, config_path)
         started_at = now().isoformat()
         runtime = {"ready": False, "gateway_started_at": started_at, "effective_release_id": None, "last_error": None}
         try:
+            # The gateway fails closed on unreachable targets, so the executor is ready before it starts.
+            executor = launch_executor(bundle, settings, release_id)
+            config = gateway_config(bundle, release_id, settings, executor=executor)
+            validate_config(config, settings, config_path)
             process = subprocess.Popen([settings.gateway_binary, "-f", str(config_path)], start_new_session=True)
             runtime["gateway_pid"] = process.pid
+            runtime["executor_pid"] = executor.process.pid if executor else None
             with candidate(bundle, settings) as (_, _, expected):
-                verify_effective(bundle, release_id, settings, process, expected)
+                verify_effective(bundle, release_id, settings, process, expected, executor)
             runtime.update(ready=True, effective_release_id=active.id if active else None, protocol_smoke_profiles=[MODERN, LEGACY])
             good_bundle, good_id = bundle, release_id
             good_catalog = expected
@@ -66,6 +85,8 @@ def main():
             while not stopped.is_set():
                 if process.poll() is not None:
                     raise RuntimeError("Gateway process exited; stopping Server for supervisor recovery")
+                if executor and executor.process.poll() is not None:
+                    raise RuntimeError("Executor process exited; stopping Server for supervisor recovery")
                 try:
                     # A lost advisory-lock connection must terminate ownership too.
                     owner.execute(text("SELECT 1"))
@@ -80,23 +101,27 @@ def main():
                             next_bundle, next_id, checksum = desired.bundle, desired.id, desired.checksum
                     if pending:
                         failure = None
+                        next_executor = None
                         try:
                             if digest(next_bundle) != checksum:
                                 raise ValueError("Release checksum mismatch")
                             approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
                             compile_bundle(next_bundle["tools"], next_bundle["connections"], approved)
                             with candidate(next_bundle, settings) as (_, _, next_catalog):
-                                config = gateway_config(next_bundle, next_id, settings)
+                                # The previous executor keeps serving until the gateway has switched and verified.
+                                next_executor = launch_executor(next_bundle, settings, next_id)
+                                config = gateway_config(next_bundle, next_id, settings, executor=next_executor)
                                 staged = settings.state_dir / "validated.json"
                                 validate_config(config, settings, staged)
                                 write_atomic(config_path, config)
-                                verify_effective(next_bundle, next_id, settings, process, next_catalog)
+                                verify_effective(next_bundle, next_id, settings, process, next_catalog, next_executor)
                         except Exception as exc:
                             failure = str(exc)[:800].replace(settings.gateway_token, "[REDACTED]")
                             log.warning("Release %s failed: %s", next_id, failure)
+                            retire_executor(next_executor)
                             # Preserve availability only if the previous release verifies again.
-                            write_atomic(config_path, gateway_config(good_bundle, good_id, settings))
-                            verify_effective(good_bundle, good_id, settings, process, good_catalog)
+                            write_atomic(config_path, gateway_config(good_bundle, good_id, settings, executor=executor))
+                            verify_effective(good_bundle, good_id, settings, process, good_catalog, executor)
                         with sessions.begin() as session:
                             server = session.scalar(select(Server).where(Server.id == server_id).with_for_update())
                             release = session.get(Release, next_id)
@@ -112,7 +137,10 @@ def main():
                                 release.status = "active"
                                 server.active_release_id = next_id
                                 good_bundle, good_id, good_catalog = next_bundle, next_id, next_catalog
-                                runtime.update(effective_release_id=next_id, last_error=None)
+                                if executor is not next_executor:
+                                    retire_executor(executor)
+                                    executor = next_executor
+                                runtime.update(effective_release_id=next_id, last_error=None, executor_pid=executor.process.pid if executor else None)
                                 # Durable authoritative copy is PostgreSQL; this is a local recovery artifact.
                                 write_atomic(settings.state_dir / "last-known-good.json", {"release_id": next_id, "checksum": checksum, "bundle": next_bundle})
                                 audit(session, "controller", "release.active", next_id, gateway_pid=process.pid, checksum=checksum)
@@ -122,10 +150,10 @@ def main():
                         log.info("Release %s %s; gateway PID %s", next_id, "failed" if failure else "active", process.pid)
                     # Detect config drift, including changes through the private upstream UI.
                     if time.monotonic() - last_check > 10:
-                        expected_config = gateway_config(good_bundle, good_id, settings)
+                        expected_config = gateway_config(good_bundle, good_id, settings, executor=executor)
                         if json.loads(config_path.read_text()) != expected_config:
                             raise RuntimeError("Gateway configuration drift detected")
-                        verify_effective(good_bundle, good_id, settings, process, good_catalog)
+                        verify_effective(good_bundle, good_id, settings, process, good_catalog, executor)
                         last_check = time.monotonic()
                 except SQLAlchemyError:
                     # Keep serving the last verified release while the registry recovers.
@@ -137,6 +165,7 @@ def main():
         finally:
             if process:
                 stop_process(process)
+            retire_executor(executor)
             try:
                 with sessions.begin() as session:
                     server = session.get(Server, server_id)

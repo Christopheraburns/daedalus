@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, SchemaError
 
+from . import packs
 from .contracts import ConnectionSpec, ToolSpec
 
 
@@ -50,8 +51,24 @@ def validate_body(schema, depth=0):
         validate_body(prop, depth + 1)
 
 
+def validate_python_tool(spec, connection, allowed):
+    info = packs.tool_info(spec["pack"], spec["function"])
+    if info["requires_connection"]:
+        if connection is None:
+            raise ValueError(f"{spec['pack']}.{spec['function']} requires a connection")
+        validate_connection(connection, allowed)
+    elif connection is not None:
+        validate_connection(connection, allowed)
+    if spec["effect"] != info["effect"]:
+        raise ValueError(f"{spec['pack']}.{spec['function']} is a {info['effect']} tool; set the matching side effect")
+    if not spec["description"].strip():
+        raise ValueError("Add a description explaining when the tool should be used")
+
+
 def validate_tool(spec, connection, allowed):
     ToolSpec.model_validate(spec)
+    if spec.get("kind") == "python":
+        return validate_python_tool(spec, connection, allowed)
     validate_connection(connection, allowed)
     path = spec["path"]
     if not re.fullmatch(r"/(?:[A-Za-z0-9_{}./-])*", path) or path.startswith("//") or any(p in {".", ".."} for p in path.split("/")):
@@ -76,18 +93,45 @@ def validate_tool(spec, connection, allowed):
         validate_body(spec["body_schema"])
 
 
+def executor_schema(python_tools):
+    """The executor as an OpenAPI target: one POST operation per Python tool, so the
+    gateway derives tool schemas exactly as it does for HTTP tools."""
+    paths = {}
+    for tool in python_tools:
+        operation = {"operationId": tool["name"], "description": tool["description"], "responses": {"200": {"description": "JSON result"}}}
+        if tool["input_schema"]["properties"]:
+            operation["requestBody"] = {"required": True, "content": {"application/json": {"schema": tool["input_schema"]}}}
+        paths[f"/tools/{tool['name']}"] = {"post": operation}
+    return {"openapi": "3.0.3", "info": {"title": "Daedalus executor", "version": "1"}, "servers": [{"url": "/"}], "paths": paths}
+
+
 def fingerprint(spec, connection):
     # enabled is release membership; toggling it does not change execution semantics.
-    return digest({"tool": {k: v for k, v in spec.items() if k != "enabled"}, "connection": connection})
+    record = {"tool": {k: v for k, v in spec.items() if k != "enabled"}, "connection": connection}
+    if spec.get("kind") == "python":
+        # Editing a project pack invalidates test evidence for the tools it serves.
+        record["pack_source"] = packs.source_digest(spec["pack"])
+    return digest(record)
 
 
 def compile_bundle(tools, connections, allowed):
-    targets, names = [], set()
+    targets, names, python_tools = [], set(), []
     enabled = sorted((t for t in tools if t["spec"]["enabled"]), key=lambda t: t["spec"]["name"])
-    for connection_id in sorted({t["spec"]["connection_id"] for t in enabled}):
+    for tool in (t for t in enabled if t["spec"].get("kind") == "python"):
+        spec = tool["spec"]
+        connection = connections[spec["connection_id"]] if spec.get("connection_id") else None
+        validate_tool(spec, connection, allowed)
+        if spec["name"] in names:
+            raise ValueError("Tool names must be unique across the server")
+        names.add(spec["name"])
+        python_tools.append({"name": spec["name"], "description": spec["description"], "pack": spec["pack"], "function": spec["function"],
+            "connection_id": spec.get("connection_id"), "config": spec.get("config", {}), "effect": spec["effect"],
+            "input_schema": packs.input_schema(packs.tool_info(spec["pack"], spec["function"])["parameters"])})
+    http_tools = [t for t in enabled if t["spec"].get("kind", "http") == "http"]
+    for connection_id in sorted({t["spec"]["connection_id"] for t in http_tools}):
         connection = connections[connection_id]
         paths = {}
-        for tool in (t for t in enabled if t["spec"]["connection_id"] == connection_id):
+        for tool in (t for t in http_tools if t["spec"]["connection_id"] == connection_id):
             spec = tool["spec"]
             validate_tool(spec, connection, allowed)
             if spec["name"] in names:
@@ -105,4 +149,7 @@ def compile_bundle(tools, connections, allowed):
             methods[spec["method"].lower()] = operation
         schema = {"openapi": "3.0.3", "info": {"title": connection["name"], "version": "1"}, "servers": [{"url": "/"}], "paths": paths}
         targets.append({"connection_id": connection_id, "host": connection["base_url"].rstrip("/"), "schema": schema})
-    return {"schema_version": "factory/v1", "tools": enabled, "connections": {k: connections[k] for k in sorted({t["spec"]["connection_id"] for t in enabled})}, "targets": targets}
+    used = sorted({t["spec"]["connection_id"] for t in enabled if t["spec"].get("connection_id")})
+    # Project pack code is snapshotted so a published server never changes when the file is edited later.
+    pack_sources = {name: packs.project_path(name).read_text() for name in sorted({t["pack"] for t in python_tools}) if name not in packs.builtin_names()}
+    return {"schema_version": "factory/v1", "tools": enabled, "connections": {k: connections[k] for k in used}, "targets": targets, "python_tools": python_tools, "pack_sources": pack_sources}

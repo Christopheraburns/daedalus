@@ -24,7 +24,8 @@ class Settings:
     database_url: str = field(default_factory=database_url)
     auth_mode: str = field(default_factory=lambda: os.getenv("FACTORY_AUTH_MODE", ""))
     allowed_origins: list[str] = field(default_factory=lambda: os.getenv("FACTORY_ALLOWED_API_ORIGINS", "").split(","))
-    browser_origins: list[str] = field(default_factory=lambda: os.getenv("FACTORY_BROWSER_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(","))
+    # Browsers send Origin without a trailing slash; tolerate one (and spaces) in the setting.
+    browser_origins: list[str] = field(default_factory=lambda: [origin.strip().rstrip("/") for origin in os.getenv("FACTORY_BROWSER_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")])
     gateway_token: str = field(default_factory=lambda: os.environ["FACTORY_MCP_TOKEN"])
     gateway_binary: str = field(default_factory=lambda: os.getenv("FACTORY_GATEWAY_BINARY", "/opt/mcp-factory/bin/agentgateway"))
     gateway_host: str = field(default_factory=lambda: os.getenv("FACTORY_GATEWAY_BIND", "127.0.0.1"))

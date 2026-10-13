@@ -1,5 +1,12 @@
 export type Parameter = { name: string; location: 'path' | 'query'; type: 'string' | 'integer' | 'number' | 'boolean'; required: boolean; description: string };
-export type ToolSpec = { name: string; description: string; connection_id: string; method: 'GET' | 'POST'; path: string; parameters: Parameter[]; body_schema: Record<string, unknown> | null; effect: 'read' | 'write'; enabled: boolean };
+export type ToolKind = 'http' | 'python';
+export type ToolSpec = { name: string; description: string; kind?: ToolKind; connection_id: string | null; method: 'GET' | 'POST'; path: string; parameters: Parameter[]; body_schema: Record<string, unknown> | null; pack?: string; function?: string; config?: Record<string, unknown>; effect: 'read' | 'write'; enabled: boolean };
+export type PackTool = { function: string; description: string; effect: 'read' | 'write'; requires_connection: boolean; parameters: { name: string; type: string; required: boolean }[]; source?: string };
+export type Pack = { name: string; description: string; origin: 'builtin' | 'project'; editable: boolean; error: string | null; tools: PackTool[]; source?: string };
+/** What the canvas and lists show for a tool: method and path for HTTP tools, pack.function for Python tools. */
+export function toolLabel(tool: ToolSpec): { method: string; subtitle: string } {
+  return tool.kind === 'python' ? { method: 'PY', subtitle: `${tool.pack}.${tool.function}` } : { method: tool.method, subtitle: tool.path };
+}
 export type Tool = ToolSpec & { id: string; revision: number; validated: boolean; tested: boolean; published: boolean; test_summary: { success: boolean; duration_ms: number; tested_at: string } | null };
 export type Connection = { id: string; revision: number; name: string; base_url: string; auth_mode: 'none' };
 export type ApiOrigin = { id: string; server_id: string; revision: number; origin: string; description: string; enabled: boolean; bootstrap?: boolean; created_at?: string };
@@ -18,6 +25,6 @@ export type Workspace = {
 export type Preview = { revision: number; added: string[]; changed: string[]; removed: string[]; problems: string[] };
 export type OpenAPIOperation = { method: string; path: string; name: string; description: string; parameters: Parameter[]; body_schema: Record<string, unknown> | null; effect: 'read' | 'write'; supported?: boolean };
 export function specOf(tool: Tool): ToolSpec {
-  const { name, description, connection_id, method, path, parameters, body_schema, effect, enabled } = tool;
-  return { name, description, connection_id, method, path, parameters, body_schema, effect, enabled };
+  const { name, description, kind, connection_id, method, path, parameters, body_schema, pack, function: fn, config, effect, enabled } = tool;
+  return { name, description, kind, connection_id, method, path, parameters, body_schema, pack, function: fn, config, effect, enabled };
 }

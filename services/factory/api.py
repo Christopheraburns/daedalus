@@ -15,7 +15,8 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import select, text
 
 from .compiler import compile_bundle, digest, fingerprint, validate_connection, validate_tool
-from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, LayoutSpec, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
+from . import packs
+from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, LayoutSpec, PackSource, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
 from .db import ApiOrigin, Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
 from .gateway import candidate, rpc
 from .settings import SERVER_ID, Settings
@@ -108,9 +109,11 @@ def create_app(settings=None):
     def connection_json(item):
         return {"id": item.id, "revision": item.revision, **item.spec}
 
+    def connection_spec(session, item):
+        return get(session, Connection, item.connection_id).spec if item.connection_id else None
+
     def tool_json(session, item, server_id):
-        conn = get(session, Connection, item.connection_id)
-        fp = fingerprint(item.spec, conn.spec)
+        fp = fingerprint(item.spec, connection_spec(session, item))
         server = get(session, Server, selected(server_id))
         active = session.get(Release, server.active_release_id) if server.active_release_id else None
         published = bool(active and item.spec["enabled"] and any(t["id"] == item.id and t["fingerprint"] == fp for t in active.bundle["tools"]))
@@ -119,7 +122,7 @@ def create_app(settings=None):
     def snapshot(session, server_id):
         server_id = selected(server_id)
         connections = {c.id: c.spec for c in session.scalars(select(Connection).where(Connection.server_id == server_id))}
-        tools = [{"id": t.id, "revision": t.revision, "spec": t.spec, "fingerprint": fingerprint(t.spec, connections[t.connection_id])} for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))]
+        tools = [{"id": t.id, "revision": t.revision, "spec": t.spec, "fingerprint": fingerprint(t.spec, connections.get(t.connection_id))} for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))]
         return tools, connections
 
     def publish_checks(session, tools):
@@ -249,7 +252,40 @@ def create_app(settings=None):
                 "releases": [release_json(r) for r in session.scalars(select(Release).where(Release.server_id == server_id).order_by(Release.created_at.desc()).limit(20))],
                 "deployment": deployment_json(deployment),
                 "allowed_api_origins": policy_origins(session, server_id),
-                "limits": {"methods": ["GET", "POST"], "parameter_locations": ["path", "query"], "max_tools": 100}}
+                "limits": {"methods": ["GET", "POST"], "parameter_locations": ["path", "query"], "max_tools": 100, "kinds": ["http", "python"]}}
+
+    @app.get("/api/packs")
+    def list_packs(role=Depends(identity)):
+        return packs.catalog()
+
+    @app.get("/api/packs/{name}")
+    def get_pack(name: str, role=Depends(identity)):
+        try:
+            return packs.pack_info(name)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+
+    # Project packs are code that runs inside Server applications; only administrators write them.
+    @app.put("/api/packs/{name}")
+    def save_pack(name: str, request: PackSource, role=Depends(require())):
+        try:
+            info = packs.save_project_pack(name, request.source)
+        except (ValueError, SyntaxError) as exc:
+            raise HTTPException(422, str(exc))
+        with sessions.begin() as session:
+            audit(session, role, "pack.save", f"pack:{name}", tools=[t["function"] for t in info["tools"]])
+        return info
+
+    @app.delete("/api/packs/{name}", status_code=204)
+    def delete_pack(name: str, role=Depends(require())):
+        with sessions.begin() as session:
+            if session.scalar(select(Tool.id).where(Tool.spec["pack"].as_string() == name)):
+                raise HTTPException(409, "Remove the tools that use this pack before deleting it")
+            try:
+                packs.delete_project_pack(name)
+            except ValueError as exc:
+                raise HTTPException(404, str(exc))
+            audit(session, role, "pack.delete", f"pack:{name}")
 
     @app.get("/api/policies/origins")
     def list_origins(server_id: str | None = Query(default=None), role=Depends(identity)):
@@ -321,12 +357,23 @@ def create_app(settings=None):
             audit(session, role, "connection.update", id)
             return connection_json(item)
 
+    def tool_connection(session, spec, server_id):
+        """The tool's connection, checked for workspace ownership; Python tools may have none.
+        Python tools are validated immediately so unknown packs never become drafts."""
+        connection = get(session, Connection, spec.connection_id) if spec.connection_id else None
+        if connection and connection.server_id != server_id: raise HTTPException(422, "Connection belongs to another server")
+        if spec.kind == "python":
+            try:
+                validate_tool(spec.model_dump(), connection.spec if connection else None, policy_origins(session, server_id))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
+        return connection
+
     @app.post("/api/tools", status_code=201)
     def create_tool(spec: ToolSpec, server_id: str | None = Query(default=None), role=Depends(require("author"))):
         with sessions.begin() as session:
             server_id = selected(server_id); server = server_lock(session, server_id)
-            connection = get(session, Connection, spec.connection_id)
-            if connection.server_id != server_id: raise HTTPException(422, "Connection belongs to another server")
+            tool_connection(session, spec, server_id)
             tools = list(session.scalars(select(Tool).where(Tool.server_id == server_id)))
             if len(tools) >= 100:
                 raise HTTPException(422, "This profile supports at most 100 tools")
@@ -346,8 +393,7 @@ def create_app(settings=None):
             item = get(session, Tool, id)
             if item.server_id != server_id: raise HTTPException(404, "Record not found")
             revision(item.revision, if_match)
-            connection = get(session, Connection, spec.connection_id)
-            if connection.server_id != server_id: raise HTTPException(422, "Connection belongs to another server")
+            tool_connection(session, spec, server_id)
             if any(t.id != id and t.spec["name"] == spec.name for t in session.scalars(select(Tool).where(Tool.server_id == server_id))):
                 raise HTTPException(409, "Tool name is already in use")
             item.spec, item.connection_id = spec.model_dump(), spec.connection_id
@@ -408,14 +454,15 @@ def create_app(settings=None):
             tool = get(session, Tool, id)
             if tool.server_id != server_id: raise HTTPException(404, "Record not found")
             revision(tool.revision, if_match)
-            conn = get(session, Connection, tool.connection_id)
+            conn = connection_spec(session, tool)
             try:
-                validate_tool(tool.spec, conn.spec, policy_origins(session, server_id))
+                validate_tool(tool.spec, conn, policy_origins(session, server_id))
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
-            tool.validated_fingerprint = fingerprint(tool.spec, conn.spec)
+            tool.validated_fingerprint = fingerprint(tool.spec, conn)
             audit(session, role, "tool.validate", id)
-            return {"valid": True, "profile": "OpenAPI 3.0.3: scalar path/query parameters and JSON object bodies"}
+            profile = f"Python pack {tool.spec['pack']}.{tool.spec['function']} served by the executor" if tool.spec.get("kind") == "python" else "OpenAPI 3.0.3: scalar path/query parameters and JSON object bodies"
+            return {"valid": True, "profile": profile}
 
     @app.post("/api/tools/{id}/test")
     def test_tool(id: str, request: TestRequest, server_id: str | None = Query(default=None), if_match: str | None = Header(default=None), role=Depends(require("author"))):
@@ -426,12 +473,12 @@ def create_app(settings=None):
                 server_id = selected(server_id); tool = get(session, Tool, id)
                 if tool.server_id != server_id: raise HTTPException(404, "Record not found")
                 revision(tool.revision, if_match)
-                conn = get(session, Connection, tool.connection_id)
-                fp = fingerprint(tool.spec, conn.spec)
+                conn = connection_spec(session, tool)
+                fp = fingerprint(tool.spec, conn)
                 if tool.spec["effect"] == "write" and not request.confirm_write:
                     raise HTTPException(422, "Confirm the live write test explicitly")
                 tool_data = {"id": tool.id, "revision": tool.revision, "spec": {**tool.spec, "enabled": True}, "fingerprint": fp}
-                bundle = compile_bundle([tool_data], {conn.id: conn.spec}, policy_origins(session, server_id))
+                bundle = compile_bundle([tool_data], {tool.connection_id: conn} if conn else {}, policy_origins(session, server_id))
             started = time.monotonic()
             try:
                 with candidate(bundle, settings) as (url, token, tools):
@@ -448,8 +495,7 @@ def create_app(settings=None):
                 server_lock(session, server_id)
                 current = get(session, Tool, id)
                 if current.server_id != server_id: raise HTTPException(404, "Record not found")
-                current_conn = get(session, Connection, current.connection_id)
-                if fingerprint(current.spec, current_conn.spec) != fp:
+                if fingerprint(current.spec, connection_spec(session, current)) != fp:
                     raise HTTPException(409, "Definition changed during testing; result cannot qualify this draft")
                 current.tested_fingerprint = fp if outcome["success"] else None
                 if outcome["success"]:

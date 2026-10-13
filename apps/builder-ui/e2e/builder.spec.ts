@@ -20,7 +20,9 @@ test.beforeAll(async ({ request }) => {
 
 async function login(page: Page, token = admin, url = '/') {
   await page.goto(url);
-  if (await page.getByRole('heading', { name: /MCP server/ }).isVisible().catch(() => false)) return;
+  // Open-admin builds show the login form only until the workspace loads, so give the heading a moment before logging in.
+  const heading = page.getByRole('heading', { name: /MCP server/ });
+  if (await heading.waitFor({ timeout: 5_000 }).then(() => true, () => false)) return;
   await page.getByLabel('Management token').fill(token);
   await page.getByRole('button', { name: 'Enter workspace' }).click();
   await expect(page.getByRole('heading', { name: 'My MCP server' })).toBeVisible();
@@ -179,4 +181,82 @@ test('creates an isolated server workspace and shows its deployment state', asyn
   const deployment = page.getByRole('dialog', { name: 'Deployment & monitoring' });
   await expect(deployment).toContainText('Application not provisioned');
   await expect(deployment).toContainText('not deployed');
+});
+
+test('create, inspect and test Python pack tools from the palette', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  // fetch_json needs an API connection; make sure one exists so "Add all" creates every demo tool.
+  const connection = await page.request.post('http://127.0.0.1:18000/api/connections', { headers: { Authorization: `Bearer ${admin}` }, data: { name: `Pack APIs ${suffix}`, base_url: 'http://mock-api:8080' } });
+  expect(connection.ok()).toBeTruthy();
+  const demo = page.locator('.pack-group').filter({ hasText: 'demo' });
+  await expect(demo).toBeVisible();
+  await demo.getByRole('button', { name: /^READ echo/ }).click();
+  await expect(page.getByLabel('Tool name', { exact: true })).toHaveValue(/^echo/);
+  await expect(page.locator('.inspector')).toContainText('PYTHON TOOL');
+  await expect(page.locator('.inspector')).toContainText('demo.echo');
+  await expect(page.locator('.inspector')).toContainText('text');
+  await runTest(page);
+  await expect(page.locator('.result-output')).toContainText('example');
+  await page.getByRole('button', { name: 'Close playground' }).click();
+  const created = (await workspace(page)).tools.find((t: { pack?: string; function?: string }) => t.pack === 'demo' && t.function === 'echo');
+  expect(created.kind).toBe('python');
+  expect(created.connection_id).toBeNull();
+  await demo.getByRole('button', { name: 'Add all', exact: true }).click();
+  await expect(page.locator('.message-bar')).toContainText(/tools added|already on the canvas/);
+  // Earlier runs leave their own demo tools behind, so compare the set of functions rather than the list.
+  await expect.poll(async () => [...new Set((await workspace(page)).tools.filter((t: { pack?: string }) => t.pack === 'demo').map((t: { function?: string }) => t.function))].sort()).toEqual(['echo', 'fetch_json', 'whoami']);
+  await page.getByRole('button', { name: 'List', exact: true }).click();
+  await expect(page.locator('.table-row').filter({ hasText: 'demo.whoami' })).toBeVisible();
+  expect(errors).toEqual([]);
+  // Remove the pack tools so repeated runs do not crowd the canvas for the other tests.
+  for (const tool of (await workspace(page)).tools.filter((t: { pack?: string }) => t.pack === 'demo')) {
+    const removed = await page.request.delete(`http://127.0.0.1:18000/api/tools/${tool.id}`, { headers: { Authorization: `Bearer ${admin}`, 'If-Match': String(tool.revision) } });
+    expect(removed.ok()).toBeTruthy();
+  }
+});
+
+test('administrators write a project pack in the browser and use its tools', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  const packName = `browser_pack_${suffix.replace(/[^a-z0-9_]/g, '')}`;
+  await page.getByRole('button', { name: 'New pack', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'New tool pack' });
+  await editor.getByLabel('Pack name').fill(packName);
+  await editor.getByLabel('Python source').fill('from factory.packs import ToolContext, pack_tool\n\n@pack_tool()\ndef broken(ctx: ToolContext, n: list) -> dict:\n    """Bad parameter type."""\n    return {}\n');
+  await editor.getByRole('button', { name: 'Save pack', exact: true }).click();
+  await expect(editor.locator('.error')).toContainText('must be a str, int, float or bool');
+  await editor.getByLabel('Python source').fill('"""Browser-authored pack."""\nfrom factory.packs import ToolContext, pack_tool\n\n\n@pack_tool()\ndef greet(ctx: ToolContext, name: str) -> dict:\n    """Greet someone by name."""\n    return {"greeting": f"Hello, {name}"}\n');
+  await editor.getByRole('button', { name: 'Save pack', exact: true }).click();
+  await expect(editor).not.toBeVisible();
+  await expect(page.locator('.message-bar')).toContainText(`Pack ${packName} saved with greet`);
+  const group = page.locator('.pack-group').filter({ hasText: packName });
+  await expect(group).toContainText('project');
+  await group.getByRole('button', { name: 'View code' }).click();
+  await expect(page.getByRole('dialog', { name: `${packName} pack` })).toContainText('def greet');
+  await page.getByRole('dialog', { name: `${packName} pack` }).getByRole('button', { name: 'Close dialog' }).click();
+  await group.getByRole('button', { name: /^READ greet/ }).click();
+  await expect(page.locator('.inspector')).toContainText(`${packName}.greet`);
+  await page.locator('.inspector').getByRole('button', { name: 'View source' }).click();
+  await expect(page.getByRole('dialog', { name: `${packName}.greet` })).toContainText('Greet someone by name.');
+  await page.getByRole('dialog', { name: `${packName}.greet` }).getByRole('button', { name: 'Close dialog' }).click();
+  await runTest(page);
+  await expect(page.locator('.result-output')).toContainText('Hello, example');
+  await page.getByRole('button', { name: 'Close playground' }).click();
+  await expect(page.locator('.inspector')).toContainText('Tested');
+  // Editing the pack invalidates the test evidence without any restart.
+  await group.getByRole('button', { name: 'Edit', exact: true }).click();
+  const edit = page.getByRole('dialog', { name: `Edit pack ${packName}` });
+  await edit.getByLabel('Python source').fill('"""Browser-authored pack."""\nfrom factory.packs import ToolContext, pack_tool\n\n\n@pack_tool()\ndef greet(ctx: ToolContext, name: str) -> dict:\n    """Greet someone by name."""\n    return {"greeting": f"Hi, {name}"}\n');
+  await edit.getByRole('button', { name: 'Save pack', exact: true }).click();
+  await expect(edit).not.toBeVisible();
+  await expect(page.locator('.inspector')).not.toContainText('Tested');
+  expect(errors).toEqual([]);
+  const headers = { Authorization: `Bearer ${admin}` };
+  for (const tool of (await workspace(page)).tools.filter((t: { pack?: string }) => t.pack === packName)) {
+    expect((await page.request.delete(`http://127.0.0.1:18000/api/tools/${tool.id}`, { headers: { ...headers, 'If-Match': String(tool.revision) } })).ok()).toBeTruthy();
+  }
+  expect((await page.request.delete(`http://127.0.0.1:18000/api/packs/${packName}`, { headers })).ok()).toBeTruthy();
 });

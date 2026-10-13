@@ -72,6 +72,8 @@ limited to the behaviors listed, not exhaustive conformance.
 | Dedicated application manifest | Implemented | Template pins server ID and immutable release ID for `launch_server.py`. |
 | Deployment/monitoring UI | Verified locally | Browser creates and selects an isolated server workspace and inspects its deployment state; Builder surfaces release identity, lifecycle controls, endpoint, and bridge metrics. |
 | Cloudera deployment bridge adapter | Implemented | Explicit `cloudera-bridge` integration point sends a versioned, authenticated request; the installed Workbench control-plane contract is not yet qualified. |
+| Python tool packs and executor | Verified locally | `kind: python` tools compile into an executor OpenAPI target; tests cover pack validation, key enforcement, gateway serving under both protocol profiles, Builder test/publish flow, and controller executor switching and retirement across releases. Builder palette lists packs with click/drag creation, Add all, inspector for Python tools, and a prefilled playground. |
+| Project packs authored in the browser | Verified locally | Administrators create, edit, view and delete project packs from the Builder; saves are validated in an isolated subprocess (syntax, decorator, parameter types, hostile exit), catalogued without restart, snapshotted into releases, and pack edits invalidate tool test evidence. Backend and browser tests cover the flow. |
 
 ## Acceptance evidence
 

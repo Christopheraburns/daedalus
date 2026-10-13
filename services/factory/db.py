@@ -50,7 +50,7 @@ class Tool(Base):
     __tablename__ = "tools"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     server_id: Mapped[str] = mapped_column(ForeignKey("servers.id"), index=True)
-    connection_id: Mapped[str] = mapped_column(ForeignKey("connections.id"))
+    connection_id: Mapped[str | None] = mapped_column(ForeignKey("connections.id"))
     revision: Mapped[int] = mapped_column(Integer, default=1)
     spec: Mapped[dict] = mapped_column(JSON)
     tested_fingerprint: Mapped[str | None] = mapped_column(String(64))
