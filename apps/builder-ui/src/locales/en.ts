@@ -279,5 +279,16 @@ export const en = {
   role_author: "Author",
   role_publisher: "Publisher",
   role_viewer: "Viewer",
+  auth_none: "None · open or network-trusted",
+  auth_static: "Service secret",
+  auth_forward: "Forward the caller's token",
+  auth_proxy: "Service account acting as the caller (doAs)",
+  secret_ref: "Secret reference",
+  secret_ref_help: "The name of a FACTORY_SECRET_* variable set on the Server application. Only the name is stored; the value never enters the registry.",
+  auth_help_forward: "Each call carries the caller's own token to this API. Requires caller identity (JWT) to be configured on the server.",
+  proxy_principal: "Service principal",
+  keytab_ref: "Keytab reference",
+  doas_parameter: "doAs parameter",
+  auth_help_proxy: "Python pack tools only. Requests carry doAs=<caller>; the Kerberos exchange is integrated on the target cluster.",
 } as const;
 export type Key = keyof typeof en;

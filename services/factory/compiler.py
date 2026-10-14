@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, SchemaError
 
-from . import packs
+from . import auth, packs
 from .contracts import ConnectionSpec, ToolSpec
 
 
@@ -21,6 +21,7 @@ def digest(value):
 
 def validate_connection(spec, allowed):
     ConnectionSpec.model_validate(spec)
+    auth.validate(spec)
     url = urlsplit(spec["base_url"])
     if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise ValueError("Use an HTTP(S) base URL without credentials, query, or fragment")
@@ -70,6 +71,8 @@ def validate_tool(spec, connection, allowed):
     if spec.get("kind") == "python":
         return validate_python_tool(spec, connection, allowed)
     validate_connection(connection, allowed)
+    if connection.get("auth_mode") == "proxy-doas":
+        raise ValueError("Proxy (doAs) connections serve Python pack tools only; the gateway cannot obtain Kerberos tickets for REST tools")
     path = spec["path"]
     if not re.fullmatch(r"/(?:[A-Za-z0-9_{}./-])*", path) or path.startswith("//") or any(p in {".", ".."} for p in path.split("/")):
         raise ValueError("Use a relative API path with named {parameters}; URLs, query strings, and traversal are unsupported")

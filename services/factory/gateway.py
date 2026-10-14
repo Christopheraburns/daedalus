@@ -118,24 +118,83 @@ def target_names(bundle, release_id):
     return names or [f"r-{release_id.replace('-', '')}-empty"]
 
 
-def gateway_config(bundle, release_id, settings, port=None, admin_port=15000, host=None, token=None, executor=None):
+def target_policies(connection, secrets, jwt, forwarding):
+    """Per-connection backend policies for declarative HTTP tools (see auth.py for the modes)."""
+    mode = connection.get("auth_mode", "none")
+    if mode == "static":
+        return {"backendAuth": {"key": {"value": {"file": secrets[connection["secret_ref"]]}}}}
+    if mode == "forward-token":
+        if jwt:
+            return {"backendAuth": {"passthrough": {}}}
+        if forwarding:
+            return None  # candidate verification runs without caller identity; the live server forwards it
+        raise GatewayError("Connections that forward the caller's token need caller identity on this server (FACTORY_JWT_ISSUER)")
+    return None
+
+
+def executor_policies(executor, jwt):
+    """The executor learns the caller from headers the gateway controls, never from the client."""
+    default_user = os.getenv("FACTORY_EXECUTOR_DEFAULT_USER", "development")
+    policies = {"requestHeaderModifier": {"set": {KEY_HEADER: executor.key}}}
+    if jwt:
+        # The probe port carries no JWT, so the expression falls back to the development user there.
+        policies["transformations"] = {"request": {"set": {USER_HEADER: f"has(jwt.sub) ? jwt.sub : {json.dumps(default_user)}"}}}
+        policies["backendAuth"] = {"passthrough": {"location": {"header": {"name": TOKEN_HEADER}}}}  # bare token; tools add the scheme
+    else:
+        policies["transformations"] = {"request": {"set": {USER_HEADER: json.dumps(default_user)}}}
+    return policies
+
+
+def materialize_secrets(bundle, directory):
+    """Static connection secrets as 0600 files the gateway reads; missing ones fail the release."""
+    paths = {}
+    for connection in bundle.get("connections", {}).values():
+        if connection.get("auth_mode") == "static":
+            ref = connection["secret_ref"]
+            value = os.environ.get(ref, "")
+            if not value:
+                raise GatewayError(f"Secret {ref} is not set in this application's environment")
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            path = Path(directory) / ref
+            path.write_text(value)
+            path.chmod(0o600)
+            paths[ref] = str(path)
+    return paths
+
+
+def api_key_policy(token):
+    return {"mode": "strict", "keys": [{"keyHash": "sha256:" + hashlib.sha256(token.encode()).hexdigest()}]}
+
+
+def gateway_config(bundle, release_id, settings, port=None, admin_port=15000, host=None, token=None, executor=None, secrets=None, jwt=None, probe_port=None, forwarding=False):
     targets = []
+    secrets = secrets or {}
     for name, target in zip(openapi_target_names(bundle, release_id), bundle["targets"]):
-        targets.append({"name": name, "openapi": {"host": target["host"], "schema": canonical(target["schema"])}})
+        entry = {"name": name, "openapi": {"host": target["host"], "schema": canonical(target["schema"])}}
+        policies = target_policies(bundle["connections"][target["connection_id"]], secrets, jwt, forwarding)
+        if policies:
+            entry["policies"] = policies
+        targets.append(entry)
     if bundle.get("python_tools"):
         if executor is None:
             raise GatewayError("Python tools require a running executor")
         targets.append({"name": executor_target_name(release_id), "openapi": {"host": f"http://127.0.0.1:{executor.port}", "schema": canonical(executor_schema(bundle["python_tools"]))},
-            "policies": {"requestHeaderModifier": {"set": {KEY_HEADER: executor.key}}}})
+            "policies": executor_policies(executor, jwt)})
     if not targets:
         targets = [{"name": target_names(bundle, release_id)[0], "openapi": {"host": "http://127.0.0.1:9", "schema": canonical({"openapi": "3.0.3", "info": {"title": "Empty server", "version": "1"}, "servers": [{"url": "/"}], "paths": {}})}}]
     origin_rule = '!("origin" in request.headers) || request.headers["origin"] in ' + canonical(settings.browser_origins)
+    public = {"port": port or settings.gateway_port, "bindAddress": host or settings.gateway_host, "authorization": {"rules": [origin_rule]}}
+    gateways = {"factory": public}
+    if jwt:
+        # Clients present the issuer's JWT; Daedalus verifies the live catalog with its own token on loopback.
+        public["jwtAuth"] = {"mode": "strict", "issuer": jwt["issuer"], "jwks": jwt["jwks"], **({"audiences": jwt["audiences"]} if jwt.get("audiences") else {})}
+        gateways["probe"] = {"port": probe_port or settings.probe_port, "bindAddress": "127.0.0.1", "apiKey": api_key_policy(token or settings.gateway_token), "authorization": {"rules": [origin_rule]}}
+    else:
+        public["apiKey"] = api_key_policy(token or settings.gateway_token)
     return {
         "config": {"adminAddr": f"127.0.0.1:{admin_port}", "statsAddr": "off", "readinessAddr": "off", "workerThreads": 2},
-        "gateways": {"factory": {"port": port or settings.gateway_port, "bindAddress": host or settings.gateway_host,
-            "apiKey": {"mode": "strict", "keys": [{"keyHash": "sha256:" + hashlib.sha256((token or settings.gateway_token).encode()).hexdigest()}]},
-            "authorization": {"rules": [origin_rule]}}},
-        "mcp": {"gateways": ["factory"], "statefulMode": "stateless", "prefixMode": "conditional", "failureMode": "failClosed", "targets": targets,
+        "gateways": gateways,
+        "mcp": {"gateways": list(gateways), "statefulMode": "stateless", "prefixMode": "never", "failureMode": "failClosed", "targets": targets,
             "policies": {"timeout": {"requestTimeout": "10s", "backendRequestTimeout": "8s", "responseIdleTimeout": "5s"}}},
     }
 
@@ -184,7 +243,7 @@ def start_executor(bundle, directory, port=None, log=None):
     key = secrets.token_urlsafe(32)
     path = Path(directory) / "executor-bundle.json"
     path.write_text(canonical(bundle))
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("FACTORY_", "DATABASE_", "POSTGRES_")) or k.startswith(("FACTORY_EXECUTOR_", "FACTORY_PACK_"))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("FACTORY_", "DATABASE_", "POSTGRES_")) or k.startswith(("FACTORY_EXECUTOR_", "FACTORY_PACK_", "FACTORY_SECRET_"))}
     env.update(FACTORY_EXECUTOR_KEY=key, PYTHONPATH=str(ROOT / "services"))
     process = subprocess.Popen([sys.executable, "-m", "factory.executor", "--bundle", str(path), "--port", str(port)], env=env, stdout=log, stderr=log, start_new_session=True)
     deadline = time.monotonic() + 20
@@ -228,10 +287,12 @@ def candidate(bundle, settings):
         token = secrets.token_urlsafe(32)
         path = Path(directory) / "gateway.json"
         with (Path(directory) / "gateway.log").open("w") as log:
-            # The gateway fails closed if a target is unreachable at startup, so the executor comes first.
-            executor = start_executor(bundle, directory, log=log) if bundle.get("python_tools") else None
-            config = gateway_config(bundle, "candidate", settings, port, admin, "127.0.0.1", token, executor)
+            executor = None
             try:
+                # The gateway fails closed if a target is unreachable at startup, so the executor comes first.
+                executor = start_executor(bundle, directory, log=log) if bundle.get("python_tools") else None
+                secret_files = materialize_secrets(bundle, Path(directory) / "secrets")
+                config = gateway_config(bundle, "candidate", settings, port, admin, "127.0.0.1", token, executor, secret_files, forwarding=settings.jwt() is not None)
                 validate_config(config, settings, path)
                 process = subprocess.Popen([settings.gateway_binary, "-f", str(path)], stdout=log, stderr=log, start_new_session=True)
             except BaseException:
@@ -253,7 +314,7 @@ def candidate(bundle, settings):
 
 
 def verify_effective(bundle, release_id, settings, process, expected_catalog, executor=None):
-    url = f"http://127.0.0.1:{settings.gateway_port}/mcp"
+    url = settings.verify_url()
     names = set(target_names(bundle, release_id))
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:

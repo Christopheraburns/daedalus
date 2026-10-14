@@ -31,7 +31,8 @@ log = logging.getLogger("factory.executor")
 
 
 def caller_from(request, default_user):
-    return packs.Caller(username=request.headers.get(USER_HEADER) or default_user, token=request.headers.get(TOKEN_HEADER) or None)
+    token = request.headers.get(TOKEN_HEADER, "").removeprefix("Bearer ").strip()
+    return packs.Caller(username=request.headers.get(USER_HEADER) or default_user, token=token or None)
 
 
 class KeyMiddleware(BaseHTTPMiddleware):

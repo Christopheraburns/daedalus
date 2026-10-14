@@ -149,6 +149,25 @@ versioned request to `FACTORY_CLOUDERA_API_BASE_URL/v1/daedalus/applications`.
 That bridge must be supplied and qualified for the installed Workbench version;
 its credentials belong in Workbench secret management, never in Git or a release.
 
+- `manual` (default) records a reviewable application intent and returns
+  `ready_to_deploy`; create the application from the template by hand.
+- `cloudera-ai` creates and manages the Server application through the
+  Workbench API v2 from inside the project: Deploy creates the application (or
+  updates and restarts it for a newer release), Refresh reads its live status,
+  Stop and Delete act on it. Configuration defaults to what Workbench sets in a
+  session: `CDSW_DOMAIN`, `CDSW_APIV2_KEY`, `CDSW_PROJECT_ID`, plus
+  `MCP_FACTORY_RUNTIME_IMAGE` for the runtime identifier; override any of them with
+  `FACTORY_CAI_API_URL`, `FACTORY_CAI_API_KEY`, `FACTORY_CAI_PROJECT_ID`,
+  `FACTORY_CAI_RUNTIME_IDENTIFIER`, and size with `FACTORY_CAI_CPU` /
+  `FACTORY_CAI_MEMORY`. Set `FACTORY_CAI_BYPASS_AUTH=true` when MCP clients
+  authenticate with a Knox JWT instead of a Workbench login. The deployed
+  application pins `FACTORY_DEPLOYED_RELEASE_ID`; deploy again to roll a newer
+  release out. The provider is tested against a fake of the API and still needs
+  verification on the target Workbench release.
+- `cloudera-bridge` sends a versioned request to
+  `FACTORY_CLOUDERA_API_BASE_URL/v1/daedalus/applications`, a customer-supplied
+  bridge.
+
 The launchers require Workbench's `CDSW_APP_PORT`. They default to loopback
 binding; verify the deployment's ingress requirements before overriding
 `FACTORY_BUILDER_BIND` or `FACTORY_GATEWAY_BIND`. Gateway admin remains loopback
@@ -165,6 +184,30 @@ list, `ko.ts` must define every key (TypeScript enforces this), and `errors.ts`
 translates backend messages by exact text or pattern. Help pages are per language
 under `apps/builder-ui/public/help/`. Tool names, descriptions and pack docstrings
 are user content and stay in whatever language they are written in.
+
+## Connection authentication and caller identity
+
+Each connection has an `auth_mode` (see [services/factory/auth.py](services/factory/auth.py)):
+
+| Mode | What a tool call sends to the API | Where the credential lives |
+| --- | --- | --- |
+| `none` | nothing | — |
+| `static` | `Authorization: Bearer <secret>` | a `FACTORY_SECRET_*` variable on the Server application; the registry stores only its name |
+| `forward-token` | the caller's own bearer token | the client's request; requires caller identity below |
+| `proxy-doas` | `doAs=<caller>` as a fixed service principal (Python tools only) | keytab reference; the Kerberos exchange is integrated per cluster |
+
+Python tools get this through `ctx.client()`; REST tools get the equivalent
+agentgateway backend policy, with static secrets written as 0600 files per
+release. A missing secret fails the test or release with its name.
+
+**Caller identity.** Set `FACTORY_JWT_ISSUER`, optionally `FACTORY_JWT_AUDIENCE`,
+and `FACTORY_JWT_JWKS_FILE` (the issuer's JWKS, for example Knox's) on the Server
+application. The public MCP port then accepts only that issuer's JWTs, the
+verified `sub` becomes `ctx.caller.username` for every tool, `forward-token`
+connections pass the JWT to backends, and the controller verifies the live
+catalog through a loopback probe port (`FACTORY_PROBE_PORT`, default 15001)
+with its own token. Without an issuer the behaviour is unchanged: one static
+MCP token and the `development` caller.
 
 ## Python tool packs
 

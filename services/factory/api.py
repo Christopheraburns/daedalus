@@ -145,9 +145,10 @@ def create_app(settings=None):
     def safe_error(exc):
         # Known credentials never reach responses or audit, including upstream echoes.
         message = str(exc)[:1200]
-        for token, _ in identities:
-            message = message.replace(token, "[REDACTED]")
-        return message.replace(settings.gateway_token, "[REDACTED]").replace(settings.cloudera_api_token, "[REDACTED]")
+        for token in [*(t for t, _ in identities), settings.gateway_token, settings.cloudera_api_token]:
+            if token:  # an empty credential would otherwise redact between every character
+                message = message.replace(token, "[REDACTED]")
+        return message
 
     @app.get("/healthz")
     def health():
@@ -511,7 +512,8 @@ def create_app(settings=None):
     def safe_error_json(result, candidate_token):
         output = json.dumps(result)
         for token in [candidate_token, settings.gateway_token, *[t for t, _ in identities]]:
-            output = output.replace(token, "[REDACTED]")
+            if token:
+                output = output.replace(token, "[REDACTED]")
         return output
 
     @app.get("/api/releases/preview")

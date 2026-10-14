@@ -135,7 +135,8 @@ def test_controller_switches_executors_between_releases(registry, monkeypatch, t
         publish()
         assert runtime()["executor_pid"] is None
         assert catalog(url, token) == []
-        assert not list((tmp_path / "server" / "executors").iterdir())
+        remaining = list((tmp_path / "server" / "releases").iterdir())
+        assert len(remaining) == 1 and not (remaining[0] / "executor").exists()  # only the active release's assets stay
     except Exception:
         print((tmp_path / "controller.log").read_text()[-12000:])
         raise

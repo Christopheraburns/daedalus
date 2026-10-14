@@ -39,8 +39,25 @@ class Settings:
     cloudera_api_base_url: str = field(default_factory=lambda: os.getenv("FACTORY_CLOUDERA_API_BASE_URL", ""))
     cloudera_project_id: str = field(default_factory=lambda: os.getenv("FACTORY_CLOUDERA_PROJECT_ID", ""))
     cloudera_api_token: str = field(default_factory=lambda: os.getenv("FACTORY_CLOUDERA_API_TOKEN", ""))
+    # Caller identity: when an issuer is set, the public MCP port requires a JWT from it (Knox), the
+    # verified subject becomes the caller for tools, and Daedalus's own probes use a loopback port.
+    jwt_issuer: str = field(default_factory=lambda: os.getenv("FACTORY_JWT_ISSUER", ""))
+    jwt_audience: str = field(default_factory=lambda: os.getenv("FACTORY_JWT_AUDIENCE", ""))
+    jwt_jwks_file: str = field(default_factory=lambda: os.getenv("FACTORY_JWT_JWKS_FILE", ""))
+    probe_port: int = field(default_factory=lambda: int(os.getenv("FACTORY_PROBE_PORT", "15001")))
+
+    def jwt(self):
+        if not self.jwt_issuer:
+            return None
+        return {"issuer": self.jwt_issuer, "audiences": [self.jwt_audience] if self.jwt_audience else None, "jwks": {"file": self.jwt_jwks_file}}
+
+    def verify_url(self):
+        """Where the controller verifies the live catalog with its own token."""
+        return f"http://127.0.0.1:{self.probe_port if self.jwt_issuer else self.gateway_port}/mcp"
 
     def __post_init__(self):
+        if self.jwt_issuer and not Path(self.jwt_jwks_file).is_file():
+            raise ValueError("FACTORY_JWT_JWKS_FILE must point to the issuer's JWKS file when FACTORY_JWT_ISSUER is set")
         if self.auth_mode not in {"development-token", "development-open"}:
             raise ValueError("Set FACTORY_AUTH_MODE to development-token or development-open for this evaluation build; production identity integration is not yet implemented")
         if len(self.gateway_token) < 32:

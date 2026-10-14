@@ -8,7 +8,8 @@ export function toolLabel(tool: ToolSpec): { method: string; subtitle: string } 
   return tool.kind === 'python' ? { method: 'PY', subtitle: `${tool.pack}.${tool.function}` } : { method: tool.method, subtitle: tool.path };
 }
 export type Tool = ToolSpec & { id: string; revision: number; validated: boolean; tested: boolean; published: boolean; test_summary: { success: boolean; duration_ms: number; tested_at: string } | null };
-export type Connection = { id: string; revision: number; name: string; base_url: string; auth_mode: 'none' };
+export type AuthMode = 'none' | 'static' | 'forward-token' | 'proxy-doas';
+export type Connection = { id: string; revision: number; name: string; base_url: string; auth_mode: AuthMode; secret_ref?: string; proxy_principal?: string; keytab_ref?: string; doas_parameter?: string };
 export type ApiOrigin = { id: string; server_id: string; revision: number; origin: string; description: string; enabled: boolean; bootstrap?: boolean; created_at?: string };
 export type Release = { id: string; status: string; checksum: string; error: string | null; created_at: string; created_by: string; tool_names: string[] };
 export type Deployment = { id: string; revision: number; status: string; desired_release_id: string | null; deployed_release_id: string | null; application_name: string | null; application_id: string | null; endpoint: string | null; provider: string; message: string | null; metrics: Record<string, unknown>; updated_at: string };

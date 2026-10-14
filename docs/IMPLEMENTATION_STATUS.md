@@ -76,6 +76,8 @@ limited to the behaviors listed, not exhaustive conformance.
 | Project packs authored in the browser | Verified locally | Administrators create, edit, view and delete project packs from the Builder; saves are validated in an isolated subprocess (syntax, decorator, parameter types, hostile exit), catalogued without restart, snapshotted into releases, and pack edits invalidate tool test evidence. Backend and browser tests cover the flow. |
 | In-app help | Verified locally | Tool-pack how-to guide served at `/help/tool-packs.html` (English and Korean), linked from the header, pack editor and palette; browser test checks both the dev server and the application port. |
 | English and Korean UI | Implemented | 274 UI strings plus ~60 backend messages translated; language selector in the header with per-browser persistence and browser-language default; browser test switches languages. Korean wording awaits native review. |
+| Connection authentication modes | Verified locally | `none`, `static` (secret reference, gateway backend policy and `ctx.client()`), `forward-token`, `proxy-doas` stub (Python only; Kerberos step integrated on-cluster). Secrets never enter the registry; missing secrets fail tests and releases by name. Connection dialog and inspector expose the modes. |
+| Caller identity (JWT) | Verified locally | Optional `jwtAuth` on the public port from a configured issuer/JWKS; `jwt.sub` reaches tools as `ctx.caller.username`, caller tokens forward to backends, Daedalus probes use a loopback port. Tested with a generated issuer; Knox issuer values pending from the customer. |
 
 ## Acceptance evidence
 

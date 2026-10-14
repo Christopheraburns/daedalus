@@ -10,7 +10,12 @@ class Contract(BaseModel):
 class ConnectionSpec(Contract):
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(min_length=1, max_length=300)
-    auth_mode: Literal["none"] = "none"
+    # See auth.py for what each mode means. Only references to secrets are stored, never values.
+    auth_mode: Literal["none", "static", "forward-token", "proxy-doas"] = "none"
+    secret_ref: str = Field(default="", max_length=80)
+    proxy_principal: str = Field(default="", max_length=200)
+    keytab_ref: str = Field(default="", max_length=80)
+    doas_parameter: str = Field(default="doAs", max_length=40)
 
 
 class ApiOriginSpec(Contract):

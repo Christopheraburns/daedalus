@@ -1,7 +1,7 @@
 """Two unrelated, deterministic development fixtures. No customer data."""
 import threading
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Daedalus fixtures")
@@ -44,6 +44,13 @@ def create_ticket(body: Ticket):
     return result
 
 
+@app.get("/fixture/echo")
+def echo(request: Request):
+    """What the backend received: lets tests confirm which credential a connection sent."""
+    return {"authorization": request.headers.get("authorization"), "query": dict(request.query_params)}
+
+
 @app.get("/fixture/counters")
 def counters():
     return dict(calls)
+

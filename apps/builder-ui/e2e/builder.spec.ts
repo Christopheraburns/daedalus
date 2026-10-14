@@ -289,3 +289,26 @@ test('the language selector switches the Builder to Korean and back', async ({ p
   await expect(page.getByRole('button', { name: 'Review & publish' })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('connections carry an authentication mode and only a secret reference', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Add connection', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect an API' });
+  await dialog.getByLabel('Connection name').fill(`Secured APIs ${suffix}`);
+  await dialog.getByLabel('Base URL').fill('http://mock-api:8080');
+  await dialog.getByLabel('Authentication').selectOption('static');
+  await dialog.getByLabel('Secret reference').fill(`FACTORY_SECRET_BROWSER_${suffix.toUpperCase()}`);
+  await dialog.getByRole('button', { name: 'Save connection' }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator('.inspector')).toContainText('Service secret');
+  await expect(page.locator('.inspector')).toContainText(`FACTORY_SECRET_BROWSER_${suffix.toUpperCase()}`);
+  const saved = (await workspace(page)).connections.find((c: { name: string }) => c.name === `Secured APIs ${suffix}`);
+  expect(saved.auth_mode).toBe('static');
+  expect(JSON.stringify(saved)).not.toContain('s3cret');
+  await page.getByRole('button', { name: 'Edit connection' }).click();
+  const edit = page.getByRole('dialog', { name: 'Edit API connection' });
+  await expect(edit.getByLabel('Authentication')).toHaveValue('static');
+  await edit.getByLabel('Authentication').selectOption('forward-token');
+  await expect(edit).toContainText("caller's own token");
+  await edit.getByRole('button', { name: 'Close dialog' }).click();
+});

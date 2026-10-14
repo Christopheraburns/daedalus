@@ -56,11 +56,13 @@ class ToolContext:
     config: dict = field(default_factory=dict)
 
     def client(self, timeout=10.0):
-        """An HTTP client bound to the approved connection origin. Authentication
-        strategies (caller token forwarding, proxy identities) are applied here."""
+        """An HTTP client bound to the approved connection origin, carrying whatever the
+        connection's authentication mode requires for this caller (see factory.auth)."""
         if not self.connection:
             raise ValueError("This tool requires a connection")
-        return httpx.Client(base_url=self.connection["base_url"].rstrip("/"), timeout=timeout, trust_env=False, follow_redirects=False)
+        from ..auth import credentials
+        headers, params = credentials(self.connection, self.caller)
+        return httpx.Client(base_url=self.connection["base_url"].rstrip("/"), headers=headers, params=params, timeout=timeout, trust_env=False, follow_redirects=False)
 
 
 def pack_tool(effect="read", requires_connection=False):
