@@ -60,12 +60,15 @@ class ToolContext:
         connection's authentication mode requires for this caller (see factory.auth)."""
         if not self.connection:
             raise ValueError("This tool requires a connection")
-        from ..auth import credentials
+        from ..auth import credentials, s3_auth
         headers, params = credentials(self.connection, self.caller)
-        return httpx.Client(base_url=self.connection["base_url"].rstrip("/"), headers=headers, params=params, timeout=timeout, trust_env=False, follow_redirects=False)
+        signer = s3_auth(self.connection, self.config.get("region", "us-east-1")) if self.connection.get("auth_mode") == "s3-sigv4" else None
+        return httpx.Client(base_url=self.connection["base_url"].rstrip("/"), headers=headers, params=params, auth=signer, timeout=timeout, trust_env=False, follow_redirects=False)
 
 
-def pack_tool(effect="read", requires_connection=False):
+def pack_tool(effect="read", requires_connection=False, hidden=False):
+    """Mark a function as a tool. A hidden tool is not offered in the palette; packs use it for
+    `probe(ctx)`, the connection check the Builder runs when a connection is saved."""
     if effect not in {"read", "write"}:
         raise ValueError("effect must be read or write")
 
@@ -78,9 +81,16 @@ def pack_tool(effect="read", requires_connection=False):
                 raise TypeError(f"{function.__name__}: parameter {parameter.name} must be a str, int, float or bool")
         if not (function.__doc__ or "").strip():
             raise TypeError(f"{function.__name__}: add a docstring; it becomes the tool description")
-        function.daedalus = {"effect": effect, "requires_connection": requires_connection}
+        function.daedalus = {"effect": effect, "requires_connection": requires_connection, "hidden": hidden}
         return function
     return register
+
+
+def pack_probe(function):
+    """Shorthand for the connection check: a hidden read tool named probe that takes only ctx."""
+    if function.__name__ != "probe" or len(inspect.signature(function).parameters) != 1:
+        raise TypeError("A probe is a function named probe(ctx) with no other parameters")
+    return pack_tool(effect="read", requires_connection=True, hidden=True)(function)
 
 
 def project_dir():
@@ -125,14 +135,23 @@ def resolve(pack, function, search=None):
     return available[function]
 
 
-def describe(function):
+PROTOCOLS = ("rest", "webhdfs", "s3")
+
+
+def describe(function, protocol="rest"):
     parameters = [{"name": p.name, "type": PARAMETER_TYPES[p.annotation], "required": p.default is p.empty}
         for p in list(inspect.signature(function).parameters.values())[1:]]
-    return {"function": function.__name__, "description": inspect.getdoc(function), "parameters": parameters, "source": inspect.getsource(function), **function.daedalus}
+    return {"function": function.__name__, "description": inspect.getdoc(function), "parameters": parameters, "source": inspect.getsource(function), "protocol": protocol, **function.daedalus}
 
 
 def describe_module(module):
-    return {"description": inspect.getdoc(module) or "", "tools": [describe(f) for f in tools(module).values()]}
+    """A pack declares the connection protocol its tools need with a module-level PROTOCOL (default rest)."""
+    protocol = getattr(module, "PROTOCOL", "rest")
+    if protocol not in PROTOCOLS:
+        raise ValueError(f"PROTOCOL must be one of {', '.join(PROTOCOLS)}")
+    visible = [describe(f, protocol) for f in tools(module).values() if not f.daedalus["hidden"]]
+    probe = describe(tools(module)["probe"], protocol) if "probe" in tools(module) else None
+    return {"description": inspect.getdoc(module) or "", "protocol": protocol, "tools": visible, "probe": probe}
 
 
 def input_schema(parameters):
@@ -177,17 +196,22 @@ def pack_info(name):
         raise ValueError(f"Unknown tool pack: {name}")
     inspected = inspect_file(path)
     return {"name": name, "origin": "project", "editable": True, "source": path.read_text(), "error": inspected.get("error"),
-        "description": inspected.get("description", ""), "tools": inspected.get("tools", [])}
+        "description": inspected.get("description", ""), "protocol": inspected.get("protocol", "rest"), "tools": inspected.get("tools", []), "probe": inspected.get("probe")}
 
 
 def tool_info(pack, function):
     info = pack_info(pack)
     if info["error"]:
         raise ValueError(f"Pack {pack} cannot be loaded: {info['error']}")
-    for tool in info["tools"]:
+    for tool in [*info["tools"], *([info["probe"]] if info.get("probe") else [])]:
         if tool["function"] == function:
             return tool
     raise ValueError(f"Pack {pack} has no tool named {function}")
+
+
+def probes(protocol):
+    """Packs that can check a connection of this protocol: [(pack name, probe description)]."""
+    return [(entry["name"], entry["probe"]["description"]) for entry in catalog() if entry.get("probe") and entry["protocol"] == protocol and not entry.get("error")]
 
 
 def catalog(include_source=False):
@@ -196,7 +220,7 @@ def catalog(include_source=False):
     if not include_source:
         for entry in entries:
             entry.pop("source")
-            for tool in entry["tools"]:
+            for tool in [*entry["tools"], *([entry["probe"]] if entry.get("probe") else [])]:
                 tool.pop("source", None)
     return entries
 

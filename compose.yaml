@@ -104,6 +104,15 @@ services:
       timeout: 3s
       retries: 20
 
+  # S3-compatible object store for the s3 pack's tests and playground. SeaweedFS verifies SigV4
+  # signatures like the Ozone S3 Gateway does; MinIO no longer publishes pullable images.
+  s3:
+    image: chrislusf/seaweedfs:3.90
+    platform: linux/amd64
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json", "-ip.bind=0.0.0.0"]
+    volumes:
+      - ./tests/s3-identities.json:/etc/seaweedfs/s3.json:ro
+
   ui:
     build:
       context: apps/builder-ui

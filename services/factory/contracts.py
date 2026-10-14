@@ -10,8 +10,12 @@ class Contract(BaseModel):
 class ConnectionSpec(Contract):
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(min_length=1, max_length=300)
+    # What the endpoint speaks; packs declare the protocol their tools need and the canvas only links matching pairs.
+    protocol: Literal["rest", "webhdfs", "s3", "mcp"] = "rest"
+    # mcp connections: expose the upstream server's tools through this server's releases.
+    federate: bool = False
     # See auth.py for what each mode means. Only references to secrets are stored, never values.
-    auth_mode: Literal["none", "static", "forward-token", "proxy-doas"] = "none"
+    auth_mode: Literal["none", "static", "forward-token", "proxy-doas", "s3-sigv4"] = "none"
     secret_ref: str = Field(default="", max_length=80)
     proxy_principal: str = Field(default="", max_length=200)
     keytab_ref: str = Field(default="", max_length=80)

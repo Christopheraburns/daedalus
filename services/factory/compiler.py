@@ -22,13 +22,16 @@ def digest(value):
 def validate_connection(spec, allowed):
     ConnectionSpec.model_validate(spec)
     auth.validate(spec)
+    protocol, mode = spec.get("protocol", "rest"), spec.get("auth_mode", "none")
+    if (mode == "s3-sigv4") != (protocol == "s3") and not (protocol == "s3" and mode == "none"):
+        raise ValueError("S3 connections use S3 access-key authentication (or none); other protocols cannot use it")
     url = urlsplit(spec["base_url"])
     if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise ValueError("Use an HTTP(S) base URL without credentials, query, or fragment")
     origin = f"{url.scheme}://{url.netloc}"
     if origin not in allowed:
         raise ValueError("API origin is not approved. Add it to FACTORY_ALLOWED_API_ORIGINS on both applications")
-    if url.path not in ("", "/"):
+    if url.path not in ("", "/") and spec.get("protocol") != "mcp":
         raise ValueError("Use an origin-only connection URL; put the API prefix in the tool path")
 
 
@@ -58,6 +61,8 @@ def validate_python_tool(spec, connection, allowed):
         if connection is None:
             raise ValueError(f"{spec['pack']}.{spec['function']} requires a connection")
         validate_connection(connection, allowed)
+        if connection.get("protocol", "rest") != info["protocol"]:
+            raise ValueError(f"{spec['pack']}.{spec['function']} needs a {info['protocol']} connection; {connection['name']} is {connection.get('protocol', 'rest')}")
     elif connection is not None:
         validate_connection(connection, allowed)
     if spec["effect"] != info["effect"]:
@@ -71,8 +76,10 @@ def validate_tool(spec, connection, allowed):
     if spec.get("kind") == "python":
         return validate_python_tool(spec, connection, allowed)
     validate_connection(connection, allowed)
-    if connection.get("auth_mode") == "proxy-doas":
-        raise ValueError("Proxy (doAs) connections serve Python pack tools only; the gateway cannot obtain Kerberos tickets for REST tools")
+    if connection.get("protocol", "rest") != "rest":
+        raise ValueError(f"REST tools need a rest connection; {connection['name']} is {connection['protocol']}")
+    if connection.get("auth_mode") in {"proxy-doas", "s3-sigv4"}:
+        raise ValueError("Proxy (doAs) and S3 connections serve Python pack tools only; the gateway cannot sign or obtain tickets for REST tools")
     path = spec["path"]
     if not re.fullmatch(r"/(?:[A-Za-z0-9_{}./-])*", path) or path.startswith("//") or any(p in {".", ".."} for p in path.split("/")):
         raise ValueError("Use a relative API path with named {parameters}; URLs, query strings, and traversal are unsupported")
@@ -152,7 +159,16 @@ def compile_bundle(tools, connections, allowed):
             methods[spec["method"].lower()] = operation
         schema = {"openapi": "3.0.3", "info": {"title": connection["name"], "version": "1"}, "servers": [{"url": "/"}], "paths": paths}
         targets.append({"connection_id": connection_id, "host": connection["base_url"].rstrip("/"), "schema": schema})
-    used = sorted({t["spec"]["connection_id"] for t in enabled if t["spec"].get("connection_id")})
+    # Federated MCP connections contribute their discovered tool names; the gateway serves them as extra targets.
+    federated = [{"connection_id": cid, "tools": list(connection.get("_discovered", []))} for cid, connection in sorted(connections.items()) if connection.get("protocol") == "mcp" and connection.get("federate")]
+    for entry in federated:
+        validate_connection({k: v for k, v in connections[entry["connection_id"]].items() if not k.startswith("_")}, allowed)
+        for name in entry["tools"]:
+            if name in names:
+                raise ValueError(f"Tool names must be unique across the server; {name} is also served by the federated MCP server")
+            names.add(name)
+    used = sorted({t["spec"]["connection_id"] for t in enabled if t["spec"].get("connection_id")} | {e["connection_id"] for e in federated})
     # Project pack code is snapshotted so a published server never changes when the file is edited later.
     pack_sources = {name: packs.project_path(name).read_text() for name in sorted({t["pack"] for t in python_tools}) if name not in packs.builtin_names()}
-    return {"schema_version": "factory/v1", "tools": enabled, "connections": {k: connections[k] for k in used}, "targets": targets, "python_tools": python_tools, "pack_sources": pack_sources}
+    stored = {k: {kk: vv for kk, vv in connections[k].items() if not kk.startswith("_")} for k in used}
+    return {"schema_version": "factory/v1", "tools": enabled, "connections": stored, "targets": targets, "python_tools": python_tools, "pack_sources": pack_sources, "federated": federated}
