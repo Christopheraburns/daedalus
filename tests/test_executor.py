@@ -91,7 +91,7 @@ def test_python_tool_lifecycle_in_builder(registry):
     assert result.json()["success"], result.text
     assert client.get("/api/workspace").json()["tools"][0]["tested"]
     assert client.get("/api/releases/preview").json()["problems"] == []
-    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo"]
+    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo", "hdfs"]
 
 
 @gateway
@@ -177,7 +177,7 @@ def test_project_packs_are_authored_snapshotted_and_served(registry, monkeypatch
     assert saved.json()["origin"] == "project" and saved.json()["editable"] and [t["function"] for t in saved.json()["tools"]] == ["shout"]
     assert "def shout" in saved.json()["tools"][0]["source"]
     catalog = client.get("/api/packs").json()
-    assert [p["name"] for p in catalog] == ["demo", "custom"] and "source" not in catalog[0]
+    assert [p["name"] for p in catalog] == ["demo", "hdfs", "custom"] and "source" not in catalog[0]
     assert client.get("/api/packs/demo").json()["editable"] is False
     tool = client.post("/api/tools", json={"name": "shout", "description": "Shout.", "kind": "python", "pack": "custom", "function": "shout"}).json()
     result = client.post(f"/api/tools/{tool['id']}/test", headers={"If-Match": "1"}, json={"arguments": {"body": {"text": "hi", "times": 2}}})
@@ -197,4 +197,4 @@ def test_project_packs_are_authored_snapshotted_and_served(registry, monkeypatch
     assert release["tool_names"] == ["shout"]
     assert client.delete(f"/api/tools/{tool['id']}", headers={"If-Match": "1"}).status_code == 204
     assert client.delete("/api/packs/custom").status_code == 204
-    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo"]
+    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo", "hdfs"]
