@@ -142,12 +142,7 @@ Create the applications using these scripts:
   API on the same application port.
 - Server: `deploy/workbench/launch_server.py` runs the controller and MCP gateway.
 
-The Builder has a **Deploy** panel. With `FACTORY_DEPLOYMENT_PROVIDER=manual`
-it records a reviewable application intent and returns `ready_to_deploy`; create
-the application from the template. With `cloudera-bridge`, the Builder sends a
-versioned request to `FACTORY_CLOUDERA_API_BASE_URL/v1/daedalus/applications`.
-That bridge must be supplied and qualified for the installed Workbench version;
-its credentials belong in Workbench secret management, never in Git or a release.
+The Builder has a **Deploy** panel with three providers (`FACTORY_DEPLOYMENT_PROVIDER`):
 
 - `manual` (default) records a reviewable application intent and returns
   `ready_to_deploy`; create the application from the template by hand.

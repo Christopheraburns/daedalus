@@ -39,6 +39,15 @@ class Settings:
     cloudera_api_base_url: str = field(default_factory=lambda: os.getenv("FACTORY_CLOUDERA_API_BASE_URL", ""))
     cloudera_project_id: str = field(default_factory=lambda: os.getenv("FACTORY_CLOUDERA_PROJECT_ID", ""))
     cloudera_api_token: str = field(default_factory=lambda: os.getenv("FACTORY_CLOUDERA_API_TOKEN", ""))
+    # cloudera-ai deployment provider: defaults come from the variables Workbench sets inside a session.
+    cai_domain: str = field(default_factory=lambda: os.getenv("FACTORY_CAI_DOMAIN", os.getenv("CDSW_DOMAIN", "")))
+    cai_api_url: str = field(default_factory=lambda: os.getenv("FACTORY_CAI_API_URL") or (f"https://{os.environ['CDSW_DOMAIN']}" if os.getenv("CDSW_DOMAIN") else ""))
+    cai_api_key: str = field(default_factory=lambda: os.getenv("FACTORY_CAI_API_KEY", os.getenv("CDSW_APIV2_KEY", "")))
+    cai_project_id: str = field(default_factory=lambda: os.getenv("FACTORY_CAI_PROJECT_ID", os.getenv("CDSW_PROJECT_ID", "")))
+    cai_runtime_identifier: str = field(default_factory=lambda: os.getenv("FACTORY_CAI_RUNTIME_IDENTIFIER", os.getenv("MCP_FACTORY_RUNTIME_IMAGE", "")))
+    cai_cpu: float = field(default_factory=lambda: float(os.getenv("FACTORY_CAI_CPU", "1")))
+    cai_memory: float = field(default_factory=lambda: float(os.getenv("FACTORY_CAI_MEMORY", "2")))
+    cai_bypass_auth: bool = field(default_factory=lambda: os.getenv("FACTORY_CAI_BYPASS_AUTH", "false").lower() == "true")
     # Caller identity: when an issuer is set, the public MCP port requires a JWT from it (Knox), the
     # verified subject becomes the caller for tools, and Daedalus's own probes use a loopback port.
     jwt_issuer: str = field(default_factory=lambda: os.getenv("FACTORY_JWT_ISSUER", ""))

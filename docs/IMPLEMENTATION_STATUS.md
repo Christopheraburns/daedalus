@@ -79,6 +79,7 @@ limited to the behaviors listed, not exhaustive conformance.
 | Connection authentication modes | Verified locally | `none`, `static` (secret reference, gateway backend policy and `ctx.client()`), `forward-token`, `proxy-doas` stub (Python only; Kerberos step integrated on-cluster). Secrets never enter the registry; missing secrets fail tests and releases by name. Connection dialog and inspector expose the modes. |
 | Caller identity (JWT) | Verified locally | Optional `jwtAuth` on the public port from a configured issuer/JWKS; `jwt.sub` reaches tools as `ctx.caller.username`, caller tokens forward to backends, Daedalus probes use a loopback port. Tested with a generated issuer; Knox issuer values pending from the customer. |
 | HDFS file pack | Verified locally | Eight WebHDFS tools (list, status, mkdir, move, delete, download, upload, copy) with size caps, slice reads, base64 for binary, recursive-delete opt-in, NameNode redirect handling and pseudo auth; tested against an in-memory WebHDFS fake in HttpFS and NameNode modes and through the gateway. Real HttpFS/Knox verification pending the customer environment. |
+| Cloudera AI deployment provider | Implemented | `cloudera-ai` creates, updates/restarts, refreshes, stops and deletes the Server application through the Workbench API v2 with session-provided defaults; tested against a fake of the API (payload fields, status mapping, key handling, error reporting). Live Workbench verification pending. |
 
 ## Acceptance evidence
 
