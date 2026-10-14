@@ -209,6 +209,29 @@ catalog through a loopback probe port (`FACTORY_PROBE_PORT`, default 15001)
 with its own token. Without an issuer the behaviour is unchanged: one static
 MCP token and the `development` caller.
 
+## HDFS pack
+
+The built-in `hdfs` pack manages files over the WebHDFS REST API, which HDFS
+exposes natively and Ozone exposes through HttpFS. Create a connection whose
+base URL is the HttpFS, NameNode or Knox origin, then add the tools you want:
+`list_directory`, `get_file_status`, `make_directory`, `move`, `delete`,
+`download_file`, `upload_file`, `copy`. Per-tool configuration (inspector →
+Configuration JSON):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `prefix` | `/webhdfs/v1` | Path prefix on the connection; Knox uses `/gateway/<topology>/webhdfs/v1` |
+| `follow_redirects` | `false` | Follow NameNode 307 redirects to DataNodes for reads and writes. HttpFS needs none and keeps traffic inside the approved origin |
+| `pseudo_auth` | `false` | Send `user.name=<caller>` for clusters without Kerberos |
+| `allow_recursive_delete` | `false` | Permit deleting non-empty directories |
+| `max_download_bytes` / `max_upload_bytes` / `max_copy_bytes` | 256 KiB / 1 MiB / 64 MiB | Size caps; downloads are sliced with `offset` and `max_bytes` |
+
+Text comes back as UTF-8 and other data as base64; uploads accept either.
+Credentials come from the connection's authentication mode, so the same tools
+run with a static Knox token, the caller's forwarded token, or a proxy identity.
+The mock API hosts an in-memory WebHDFS (`/webhdfs/v1`, and `/webhdfs-nn/v1`
+with NameNode-style redirects) for tests and the playground.
+
 ## Python tool packs
 
 Tools that need more than one API call, binary data, or computation are Python
