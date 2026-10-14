@@ -86,6 +86,8 @@ def hello(ctx: ToolContext, name: str, excited: bool = False) -&gt; dict:
 <table>
 <tr><th>Part</th><th>Becomes</th><th>Rules</th></tr>
 <tr><td>Module docstring</td><td>The pack description in the palette</td><td>Optional but recommended</td></tr>
+<tr><td><code>@pack_probe</code> on <code>probe(ctx)</code></td><td>The connection check the Builder runs when a connection of this protocol is saved</td><td>Optional. Return a dict with a <code>message</code>, or raise <code>ValueError</code> with the reason</td></tr>
+<tr><td><code>PROTOCOL = "rest"</code></td><td>The connection protocol the pack's tools need</td><td>Optional; <code>rest</code> (default), <code>webhdfs</code> or <code>s3</code>. The canvas only links tools to connections of this protocol</td></tr>
 <tr><td><code>@pack_tool(...)</code></td><td>Marks the function as a tool</td><td>Required. <code>effect</code> is <code>"read"</code> or <code>"write"</code>; <code>requires_connection</code> is <code>True</code> when the tool calls an API connection</td></tr>
 <tr><td>Function name</td><td>The default tool name</td><td>A valid Python identifier; the tool record's name can be changed afterwards</td></tr>
 <tr><td>First parameter <code>ctx</code></td><td>The <a href="#context">ToolContext</a></td><td>Must be named <code>ctx</code>. It is never part of the tool's inputs</td></tr>

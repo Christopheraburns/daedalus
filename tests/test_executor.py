@@ -41,6 +41,16 @@ def test_pack_catalog_and_bundle_validation():
         compile_bundle([python_tool("wrong_effect", "echo", effect="write")], {}, [])
     with pytest.raises(ValueError):
         ToolSpec(name="http_without_connection", description="x")
+    # Packs declare the protocol their tools need; the canvas and compiler only accept matching connections.
+    catalog = {p["name"]: p for p in packs.catalog()}
+    assert catalog["demo"]["protocol"] == "rest" and catalog["hdfs"]["protocol"] == "webhdfs" and catalog["s3"]["protocol"] == "s3"
+    hdfs_list = {"id": "l", "revision": 1, "spec": ToolSpec(name="l", description="list", kind="python", pack="hdfs", function="list_directory", connection_id="c").model_dump()}
+    with pytest.raises(ValueError, match="needs a webhdfs connection"):
+        compile_bundle([hdfs_list], {"c": CONNECTION}, [CONNECTION["base_url"]])
+    with pytest.raises(ValueError, match="REST tools need a rest connection"):
+        compile_bundle([{"id": "r", "revision": 1, "spec": ToolSpec(name="r", description="get", connection_id="c", path="/x").model_dump()}], {"c": {**CONNECTION, "protocol": "webhdfs"}}, [CONNECTION["base_url"]])
+    with pytest.raises(ValueError, match="S3 connections"):
+        compile_bundle([hdfs_list], {"c": {**CONNECTION, "protocol": "webhdfs", "auth_mode": "s3-sigv4", "secret_ref": "FACTORY_SECRET_X"}}, [CONNECTION["base_url"]])
     bundle = compile_bundle([python_tool("echo", "echo"), python_tool("fetch", "fetch_json", connection_id="c")], {"c": CONNECTION}, [CONNECTION["base_url"]])
     assert [t["name"] for t in bundle["python_tools"]] == ["echo", "fetch"]
     assert bundle["targets"] == [] and set(bundle["connections"]) == {"c"}
@@ -91,7 +101,7 @@ def test_python_tool_lifecycle_in_builder(registry):
     assert result.json()["success"], result.text
     assert client.get("/api/workspace").json()["tools"][0]["tested"]
     assert client.get("/api/releases/preview").json()["problems"] == []
-    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo", "hdfs"]
+    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo", "hdfs", "rest", "s3"]
 
 
 @gateway
@@ -177,7 +187,7 @@ def test_project_packs_are_authored_snapshotted_and_served(registry, monkeypatch
     assert saved.json()["origin"] == "project" and saved.json()["editable"] and [t["function"] for t in saved.json()["tools"]] == ["shout"]
     assert "def shout" in saved.json()["tools"][0]["source"]
     catalog = client.get("/api/packs").json()
-    assert [p["name"] for p in catalog] == ["demo", "hdfs", "custom"] and "source" not in catalog[0]
+    assert [p["name"] for p in catalog] == ["demo", "hdfs", "rest", "s3", "custom"] and "source" not in catalog[0]
     assert client.get("/api/packs/demo").json()["editable"] is False
     tool = client.post("/api/tools", json={"name": "shout", "description": "Shout.", "kind": "python", "pack": "custom", "function": "shout"}).json()
     result = client.post(f"/api/tools/{tool['id']}/test", headers={"If-Match": "1"}, json={"arguments": {"body": {"text": "hi", "times": 2}}})
@@ -197,4 +207,4 @@ def test_project_packs_are_authored_snapshotted_and_served(registry, monkeypatch
     assert release["tool_names"] == ["shout"]
     assert client.delete(f"/api/tools/{tool['id']}", headers={"If-Match": "1"}).status_code == 204
     assert client.delete("/api/packs/custom").status_code == 204
-    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo", "hdfs"]
+    assert [p["name"] for p in client.get("/api/packs").json()] == ["demo", "hdfs", "rest", "s3"]

@@ -85,7 +85,7 @@ def remote_exception(status, exception, message):
 
 def fs_children(path):
     prefix = path.rstrip("/") + "/"
-    return sorted(p for p in fs if p.startswith(prefix) and "/" not in p[len(prefix):])
+    return sorted(p for p in fs if p.startswith(prefix) and p[len(prefix):] and "/" not in p[len(prefix):])
 
 
 def fs_parent(path):

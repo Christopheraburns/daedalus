@@ -312,3 +312,89 @@ test('connections carry an authentication mode and only a secret reference', asy
   await expect(edit).toContainText("caller's own token");
   await edit.getByRole('button', { name: 'Close dialog' }).click();
 });
+
+test('connections are typed by protocol and the canvas only links compatible tools', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  const headers = { Authorization: `Bearer ${admin}` };
+  // Start from a workspace with only REST connections: the HDFS pack cannot attach to them.
+  for (const c of (await workspace(page)).connections.filter((c: { protocol?: string }) => c.protocol && c.protocol !== 'rest')) {
+    for (const t of (await workspace(page)).tools.filter((t: { connection_id: string | null }) => t.connection_id === c.id)) await page.request.delete(`http://127.0.0.1:18000/api/tools/${t.id}`, { headers: { ...headers, 'If-Match': String(t.revision) } });
+    await page.request.delete(`http://127.0.0.1:18000/api/connections/${c.id}`, { headers: { ...headers, 'If-Match': String(c.revision) } });
+  }
+  const hdfs = page.locator('.pack-group').filter({ hasText: 'hdfs' });
+  await expect(hdfs).toContainText('Needs a WebHDFS');
+  await hdfs.getByRole('button', { name: 'Add all', exact: true }).click();
+  await expect(page.locator('.message-bar')).toContainText('need a WebHDFS');
+  expect((await workspace(page)).tools.filter((t: { pack?: string }) => t.pack === 'hdfs')).toHaveLength(0);
+  // A WebHDFS connection to the fixture makes the pack usable; Add all links every tool to it.
+  await page.getByRole('button', { name: 'Add connection', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect an API' });
+  await dialog.getByLabel('Connection name').fill(`HDFS fixture ${suffix}`);
+  await dialog.getByLabel('Base URL').fill('http://mock-api:8080');
+  await dialog.getByLabel('Protocol').selectOption('webhdfs');
+  await dialog.getByRole('button', { name: 'Save connection' }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator('.inspector')).toContainText('WebHDFS');
+  await expect(hdfs).not.toContainText('Needs a WebHDFS');
+  await hdfs.getByRole('button', { name: 'Add all', exact: true }).click();
+  await expect(page.locator('.message-bar')).toContainText('8 tools added');
+  const fixture = (await workspace(page)).connections.find((c: { name: string }) => c.name === `HDFS fixture ${suffix}`);
+  const tools = (await workspace(page)).tools.filter((t: { pack?: string }) => t.pack === 'hdfs');
+  expect(tools.every((t: { connection_id: string | null }) => t.connection_id === fixture.id)).toBeTruthy();
+  // The inspector offers only compatible connections, and a passing test shows on the tool.
+  const listing = tools.find((t: { function?: string }) => t.function === 'list_directory');
+  await page.getByRole('button', { name: 'List', exact: true }).click();
+  await page.locator('.table-row').filter({ hasText: 'hdfs.list_directory' }).first().click();
+  const options = await page.locator('.inspector select').first().locator('option').allTextContents();
+  expect(options).toContain(`HDFS fixture ${suffix}`);
+  expect(options.some(o => o.startsWith('Browser APIs') || o.startsWith('Drag APIs'))).toBeFalsy();
+  await runTest(page);
+  await expect(page.locator('.result-output')).toContainText('"data"'); // the prefilled sample lists /
+  await page.getByRole('button', { name: 'Close playground' }).click();
+  expect(errors).toEqual([]);
+  for (const t of tools) await page.request.delete(`http://127.0.0.1:18000/api/tools/${t.id}`, { headers: { ...headers, 'If-Match': String(t.revision + (t.id === listing.id ? 0 : 0)) } }).catch(() => undefined);
+});
+
+test('a failed test marks the tool and its connection edge', async ({ page }) => {
+  await login(page);
+  const headers = { Authorization: `Bearer ${admin}` };
+  const connection = await (await page.request.post('http://127.0.0.1:18000/api/connections', { headers, data: { name: `Unset secret ${suffix}`, base_url: 'http://mock-api:8080', auth_mode: 'static', secret_ref: `FACTORY_SECRET_UNSET_${suffix.toUpperCase()}` } })).json();
+  const tool = await (await page.request.post('http://127.0.0.1:18000/api/tools', { headers, data: { name: `failing_${suffix}`, description: 'Will fail: the secret is not set.', connection_id: connection.id, method: 'GET', path: '/fixture/echo' } })).json();
+  await page.reload();
+  await page.getByRole('button', { name: 'List', exact: true }).click();
+  await page.locator('.table-row').filter({ hasText: `failing_${suffix}` }).click();
+  await page.getByRole('button', { name: 'Test tool', exact: true }).click();
+  await page.getByRole('button', { name: 'Run test', exact: true }).click();
+  await expect(page.locator('.test-columns')).toContainText('Failed');
+  await expect(page.locator('.inspector')).toContainText('Failed');
+  await page.getByRole('button', { name: 'Close playground' }).click();
+  await page.getByRole('button', { name: 'Canvas', exact: true }).click();
+  await expect(page.locator(`.react-flow__edge[data-id="api-${tool.id}"] .react-flow__edge-path`)).toHaveAttribute('style', /stroke-dasharray/);
+  await page.request.delete(`http://127.0.0.1:18000/api/tools/${tool.id}`, { headers: { ...headers, 'If-Match': String((await workspace(page)).tools.find((t: { id: string }) => t.id === tool.id).revision) } });
+  await page.request.delete(`http://127.0.0.1:18000/api/connections/${connection.id}`, { headers: { ...headers, 'If-Match': String(connection.revision) } });
+});
+
+test('saving a connection checks it and the verdict shows in the inspector and on the canvas', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  await page.getByRole('button', { name: 'Add connection', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect an API' });
+  await dialog.getByLabel('Connection name').fill(`Checked HDFS ${suffix}`);
+  await dialog.getByLabel('Base URL').fill('http://mock-api:8080');
+  await dialog.getByLabel('Protocol').selectOption('webhdfs');
+  await dialog.getByRole('button', { name: 'Save connection' }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator('.message-bar')).toContainText('WebHDFS answered', { timeout: 30_000 });
+  await expect(page.locator('.inspector')).toContainText('WebHDFS answered');
+  await expect(page.locator('.inspector')).toContainText('hdfs.probe');
+  const connection = (await workspace(page)).connections.find((c: { name: string }) => c.name === `Checked HDFS ${suffix}`);
+  expect(connection.probe_summary.success).toBeTruthy();
+  await expect(page.locator(`.react-flow__node[data-id="${connection.id}"] .status-dot`)).toHaveClass(/green/);
+  await page.getByRole('button', { name: 'Check connection', exact: true }).click();
+  await expect(page.locator('.message-bar')).toContainText('WebHDFS answered', { timeout: 30_000 });
+  expect(errors).toEqual([]);
+  await page.request.delete(`http://127.0.0.1:18000/api/connections/${connection.id}`, { headers: { Authorization: `Bearer ${admin}`, 'If-Match': String(connection.revision) } });
+});

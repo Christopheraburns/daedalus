@@ -85,6 +85,8 @@ def hello(ctx: ToolContext, name: str, excited: bool = False) -&gt; dict:
 <table>
 <tr><th>구성 요소</th><th>역할</th><th>규칙</th></tr>
 <tr><td>모듈 독스트링</td><td>팔레트의 팩 설명</td><td>선택 사항이지만 권장</td></tr>
+<tr><td><code>probe(ctx)</code>의 <code>@pack_probe</code></td><td>이 프로토콜의 연결을 저장할 때 빌더가 실행하는 연결 검사</td><td>선택 사항. <code>message</code>가 있는 dict를 반환하거나, 이유와 함께 <code>ValueError</code>를 발생시킵니다</td></tr>
+<tr><td><code>PROTOCOL = "rest"</code></td><td>팩의 도구가 필요로 하는 연결 프로토콜</td><td>선택 사항. <code>rest</code>(기본값), <code>webhdfs</code>, <code>s3</code> 중 하나. 캔버스는 이 프로토콜의 연결에만 도구를 연결합니다</td></tr>
 <tr><td><code>@pack_tool(...)</code></td><td>함수를 도구로 표시</td><td>필수. <code>effect</code>는 <code>"read"</code> 또는 <code>"write"</code>, 도구가 API 연결을 호출하면 <code>requires_connection</code>을 <code>True</code>로 설정</td></tr>
 <tr><td>함수 이름</td><td>기본 도구 이름</td><td>유효한 Python 식별자. 도구 레코드의 이름은 나중에 바꿀 수 있음</td></tr>
 <tr><td>첫 번째 매개변수 <code>ctx</code></td><td><a href="#context">ToolContext</a></td><td>이름이 반드시 <code>ctx</code>여야 하며 도구 입력에 포함되지 않음</td></tr>

@@ -182,7 +182,25 @@ are user content and stay in whatever language they are written in.
 
 ## Connection authentication and caller identity
 
-Each connection has an `auth_mode` (see [services/factory/auth.py](services/factory/auth.py)):
+Each connection has a `protocol` (`rest`, `webhdfs`, `s3`) that says what the
+endpoint speaks; packs declare the protocol their tools need with a module-level
+`PROTOCOL`, and the canvas, the inspector and the compiler only accept matching
+pairs. A failed test shows on the canvas as a red dashed edge and a *Failed*
+status.
+
+**Connection checks.** Saving a connection (or **Check connection** in the
+inspector) runs the matching pack's `probe(ctx)` through an isolated candidate:
+`rest` answers any HTTP status, `hdfs` describes `/`, `s3` lists buckets. The
+verdict is stored on the connection and shown in the inspector and as the
+connection node's status dot. Packs declare a probe with `@pack_probe`.
+
+**Federated MCP servers.** A connection with protocol `mcp` (base URL
+including the `/mcp` path, authentication as usual) is another MCP server, for
+example one built by Daedalus. Checking it discovers its tools; with *Serve this
+server's tools from here* enabled, releases include them as an agentgateway
+`mcp` target behind this server's authentication, and tool names must stay
+unique across local and federated tools. The upstream must speak the client's
+MCP protocol profile, because agentgateway forwards it unchanged. Each connection also has an `auth_mode` (see [services/factory/auth.py](services/factory/auth.py)):
 
 | Mode | What a tool call sends to the API | Where the credential lives |
 | --- | --- | --- |
@@ -226,6 +244,29 @@ Credentials come from the connection's authentication mode, so the same tools
 run with a static Knox token, the caller's forwarded token, or a proxy identity.
 The mock API hosts an in-memory WebHDFS (`/webhdfs/v1`, and `/webhdfs-nn/v1`
 with NameNode-style redirects) for tests and the playground.
+
+## S3 / Ozone pack
+
+The built-in `s3` pack manages objects through the S3 API, which the Ozone S3
+Gateway, MinIO and AWS S3 all speak. Create a connection with `auth_mode`
+`s3-sigv4` whose secret reference holds `ACCESS_KEY:SECRET_KEY` (for Ozone,
+the pair from `ozone s3 getsecret`), base URL = the S3 Gateway origin, then add
+tools: `list_buckets`, `list_objects` (folder-style with `delimiter`, paged with
+`continuation_token`), `get_object_info`, `download_object` (sliced, UTF-8 or
+base64), `upload_object` (inline content), `copy_object`, `move_object`,
+`delete_object`. Copies are server-side; objects above `multipart_threshold`
+(default 64 MiB) copy as a multipart upload of `part_size` parts, so large
+files never pass through the executor. Requests are signed with AWS Signature
+Version 4 using the standard library; no SDK is needed in the runtime image.
+Per-tool configuration: `region`, `max_download_bytes`, `max_upload_bytes`,
+`multipart_threshold`, `part_size`, `max_copy_bytes`.
+
+Locally, `docker compose up -d s3` starts a SeaweedFS S3 gateway
+(`http://s3:8333`, access key `daedalus`, secret `daedalus-secret-key` from
+`tests/s3-identities.json`) that verifies signatures as Ozone does; approve its
+origin in Policies and set `FACTORY_SECRET_S3=daedalus:daedalus-secret-key` on
+the stack to try it in the playground. Ozone's per-user S3 credentials are the one part that waits for the
+customer environment (question B4).
 
 ## Python tool packs
 

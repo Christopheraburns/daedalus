@@ -111,11 +111,20 @@ def executor_target_name(release_id):
     return f"r-{release_id.replace('-', '')}-py"
 
 
+def federated_target_names(bundle, release_id):
+    return [f"r-{release_id.replace('-', '')}-f{i}" for i, _ in enumerate(bundle.get("federated", []))]
+
+
 def target_names(bundle, release_id):
     names = openapi_target_names(bundle, release_id)
     if bundle.get("python_tools"):
         names.append(executor_target_name(release_id))
+    names.extend(federated_target_names(bundle, release_id))
     return names or [f"r-{release_id.replace('-', '')}-empty"]
+
+
+def expected_names(bundle):
+    return [t["spec"]["name"] for t in bundle["tools"]] + [name for entry in bundle.get("federated", []) for name in entry["tools"]]
 
 
 def target_policies(connection, secrets, jwt, forwarding):
@@ -180,6 +189,13 @@ def gateway_config(bundle, release_id, settings, port=None, admin_port=15000, ho
             raise GatewayError("Python tools require a running executor")
         targets.append({"name": executor_target_name(release_id), "openapi": {"host": f"http://127.0.0.1:{executor.port}", "schema": canonical(executor_schema(bundle["python_tools"]))},
             "policies": executor_policies(executor, jwt)})
+    for name, entry in zip(federated_target_names(bundle, release_id), bundle.get("federated", [])):
+        connection = bundle["connections"][entry["connection_id"]]
+        target = {"name": name, "mcp": {"host": connection["base_url"]}}
+        policies = target_policies(connection, secrets, jwt, forwarding)
+        if policies:
+            target["policies"] = policies
+        targets.append(target)
     if not targets:
         targets = [{"name": target_names(bundle, release_id)[0], "openapi": {"host": "http://127.0.0.1:9", "schema": canonical({"openapi": "3.0.3", "info": {"title": "Empty server", "version": "1"}, "servers": [{"url": "/"}], "paths": {}})}}]
     origin_rule = '!("origin" in request.headers) || request.headers["origin"] in ' + canonical(settings.browser_origins)
@@ -261,7 +277,8 @@ def start_executor(bundle, directory, port=None, log=None):
     raise GatewayError("Executor did not become ready within 20 seconds")
 
 
-def wait_catalog(url, token, process, expected_names, timeout=15):
+def wait_catalog(url, token, process, expected, timeout=15):
+    """Wait for the gateway to serve exactly the expected tool names; None accepts whatever it serves (discovery)."""
     deadline = time.monotonic() + timeout
     last_error = "Gateway not ready"
     while time.monotonic() < deadline:
@@ -269,7 +286,7 @@ def wait_catalog(url, token, process, expected_names, timeout=15):
             raise GatewayError("Gateway process exited before verification")
         try:
             tools = catalog(url, token)
-            if [t["name"] for t in tools] == sorted(expected_names):
+            if expected is None or [t["name"] for t in tools] == sorted(expected):
                 return tools
             last_error = "Gateway catalog has not converged"
         except (httpx.HTTPError, ValueError) as exc:
@@ -279,7 +296,7 @@ def wait_catalog(url, token, process, expected_names, timeout=15):
 
 
 @contextmanager
-def candidate(bundle, settings):
+def candidate(bundle, settings, discover=False):
     with tempfile.TemporaryDirectory(prefix="factory-candidate-") as directory:
         port, admin = available_port(), available_port()
         while admin == port:
@@ -301,7 +318,7 @@ def candidate(bundle, settings):
                 raise
             try:
                 url = f"http://127.0.0.1:{port}/mcp"
-                tools = wait_catalog(url, token, process, [t["spec"]["name"] for t in bundle["tools"]])
+                tools = wait_catalog(url, token, process, None if discover else expected_names(bundle))
                 # Both protocol branches are exercised before accepting a release.
                 legacy = catalog(url, token, LEGACY)
                 if [(t["name"], t.get("inputSchema")) for t in legacy] != [(t["name"], t.get("inputSchema")) for t in tools]:

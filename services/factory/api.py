@@ -107,7 +107,11 @@ def create_app(settings=None):
         return item
 
     def connection_json(item):
-        return {"id": item.id, "revision": item.revision, **item.spec}
+        return {"id": item.id, "revision": item.revision, **item.spec, "probe_summary": item.probe_summary, "discovered": item.discovered}
+
+    def connection_bundle_spec(item):
+        """The connection as the compiler sees it: mcp connections carry their discovered tool names."""
+        return {**item.spec, "_discovered": [t["name"] for t in item.discovered or []]} if item.spec.get("protocol") == "mcp" else item.spec
 
     def connection_spec(session, item):
         return get(session, Connection, item.connection_id).spec if item.connection_id else None
@@ -121,19 +125,26 @@ def create_app(settings=None):
 
     def snapshot(session, server_id):
         server_id = selected(server_id)
-        connections = {c.id: c.spec for c in session.scalars(select(Connection).where(Connection.server_id == server_id))}
+        connections = {c.id: connection_bundle_spec(c) for c in session.scalars(select(Connection).where(Connection.server_id == server_id))}
         tools = [{"id": t.id, "revision": t.revision, "spec": t.spec, "fingerprint": fingerprint(t.spec, connections.get(t.connection_id))} for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))]
         return tools, connections
 
-    def publish_checks(session, tools):
+    def publish_checks(session, tools, server_id=None):
         problems = []
         for t in tools:
             if t["spec"]["enabled"] and get(session, Tool, t["id"]).tested_fingerprint != t["fingerprint"]:
                 problems.append(f"{t['spec']['name']}: test the current definition successfully before publishing")
+        if server_id:
+            for c in session.scalars(select(Connection).where(Connection.server_id == server_id)):
+                if c.spec.get("protocol") == "mcp" and c.spec.get("federate") and not (c.probe_summary or {}).get("success"):
+                    problems.append(f"{c.spec['name']}: check the MCP connection to discover its tools before publishing")
         return problems
 
+    def federated_names(bundle):
+        return [name for entry in bundle.get("federated", []) for name in entry["tools"]]
+
     def release_json(release):
-        return {"id": release.id, "status": release.status, "checksum": release.checksum, "error": release.error, "created_at": release.created_at.isoformat(), "created_by": release.created_by, "tool_names": [t["spec"]["name"] for t in release.bundle["tools"]]}
+        return {"id": release.id, "status": release.status, "checksum": release.checksum, "error": release.error, "created_at": release.created_at.isoformat(), "created_by": release.created_by, "tool_names": [t["spec"]["name"] for t in release.bundle["tools"]] + federated_names(release.bundle)}
 
     def deployment_json(deployment):
         return {"id": deployment.id, "revision": deployment.revision, "status": deployment.status,
@@ -354,6 +365,7 @@ def create_app(settings=None):
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
             item.spec, item.revision = data, item.revision + 1
+            item.probe_summary, item.discovered = None, None  # the endpoint or credentials changed; check again
             server.revision += 1
             audit(session, role, "connection.update", id)
             return connection_json(item)
@@ -417,6 +429,57 @@ def create_app(settings=None):
             session.delete(item)
             server.revision += 1
             audit(session, role, "tool.delete", id)
+
+    @app.post("/api/connections/{id}/check")
+    def check_connection(id: str, server_id: str | None = Query(default=None), if_match: str | None = Header(default=None), role=Depends(require("author"))):
+        """Probe the endpoint through an isolated candidate (the pack's probe for rest/webhdfs/s3) or, for an
+        mcp connection, discover the upstream tools. The result is stored on the connection and shown on the canvas."""
+        if not slots.acquire(blocking=False):
+            raise HTTPException(429, "Two tests/compilations are already running; try again shortly")
+        try:
+            with sessions() as session:
+                server_id = selected(server_id); item = get(session, Connection, id)
+                if item.server_id != server_id: raise HTTPException(404, "Record not found")
+                revision(item.revision, if_match)
+                spec, origins = item.spec, policy_origins(session, server_id)
+            started = time.monotonic()
+            protocol = spec.get("protocol", "rest")
+            discovered = None
+            try:
+                if protocol == "mcp":
+                    bundle = compile_bundle([], {id: {**spec, "federate": True, "_discovered": []}}, origins)
+                    with candidate(bundle, settings, discover=True) as (url, token, tools):
+                        discovered = [{"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("inputSchema", {})} for t in tools]
+                    summary = {"success": True, "message": f"{len(discovered)} tools discovered", "pack": None}
+                else:
+                    available = packs.probes(protocol)
+                    if not available:
+                        raise HTTPException(422, f"No installed pack can check a {protocol} connection")
+                    pack = available[0][0]
+                    probe = {"id": "probe", "revision": 1, "fingerprint": "", "spec": ToolSpec(name="probe", description=available[0][1], kind="python", pack=pack, function="probe", connection_id=id).model_dump()}
+                    bundle = compile_bundle([probe], {id: spec}, origins)
+                    with candidate(bundle, settings) as (url, token, _):
+                        result = rpc(url, token, "tools/call", {"name": "probe", "arguments": {}})
+                    payload = result.get("structuredContent") or {}
+                    failure = payload.get("error") if isinstance(payload, dict) else None
+                    summary = {"success": not result.get("isError") and not failure, "message": safe_error(Exception(failure)) if failure else payload.get("message", "Connection answered"), "pack": pack}
+            except HTTPException:
+                raise
+            except Exception as exc:
+                summary = {"success": False, "message": safe_error(exc), "pack": None}
+            summary.update(duration_ms=round((time.monotonic() - started) * 1000), checked_at=datetime.now(timezone.utc).isoformat())
+            with sessions.begin() as session:
+                server_lock(session, server_id)
+                current = get(session, Connection, id)
+                if current.revision != int(if_match.strip('"')):
+                    raise HTTPException(409, "Connection changed during the check; run it again")
+                current.probe_summary = summary
+                if discovered is not None:
+                    current.discovered = discovered
+                audit(session, role, "connection.check", id, success=summary["success"], message=summary["message"][:200])
+                return connection_json(current)
+        finally:
+            slots.release()
 
     @app.delete("/api/connections/{id}", status_code=204)
     def delete_connection(id: str, server_id: str | None = Query(default=None), if_match: str | None = Header(default=None), role=Depends(require("author"))):
@@ -521,17 +584,19 @@ def create_app(settings=None):
         with sessions() as session:
             server_id = selected(server_id); server = get(session, Server, server_id)
             tools, connections = snapshot(session, server_id)
-            problems = publish_checks(session, tools)
+            problems = publish_checks(session, tools, server_id)
+            federated_after = []
             try:
-                compile_bundle(tools, connections, policy_origins(session, server_id))
+                federated_after = federated_names(compile_bundle(tools, connections, policy_origins(session, server_id)))
             except ValueError as exc:
                 problems.append(str(exc))
             active = session.get(Release, server.active_release_id) if server.active_release_id else None
             before = {t["id"]: t for t in active.bundle["tools"]} if active else {}
             after = {t["id"]: t for t in tools if t["spec"]["enabled"]}
-            return {"revision": server.revision, "added": [t["spec"]["name"] for id, t in after.items() if id not in before],
+            federated_before = federated_names(active.bundle) if active else []
+            return {"revision": server.revision, "added": [t["spec"]["name"] for id, t in after.items() if id not in before] + [n for n in federated_after if n not in federated_before],
                 "changed": [t["spec"]["name"] for id, t in after.items() if id in before and t["fingerprint"] != before[id]["fingerprint"]],
-                "removed": [t["spec"]["name"] for id, t in before.items() if id not in after], "problems": problems}
+                "removed": [t["spec"]["name"] for id, t in before.items() if id not in after] + [n for n in federated_before if n not in federated_after], "problems": problems}
 
     def enqueue(bundle, expected_revision, actor, server_id):
         if not slots.acquire(blocking=False):
@@ -563,7 +628,7 @@ def create_app(settings=None):
             server_id = selected(server_id); server = get(session, Server, server_id)
             revision(server.revision, str(request.revision))
             tools, connections = snapshot(session, server_id)
-            problems = publish_checks(session, tools)
+            problems = publish_checks(session, tools, server_id)
             if problems:
                 raise HTTPException(422, "; ".join(problems))
             try:
@@ -582,7 +647,9 @@ def create_app(settings=None):
                 raise HTTPException(422, "Only a previously verified release can be restored")
             if digest(release.bundle) != release.checksum:
                 raise HTTPException(422, "Stored release checksum mismatch")
-            bundle = compile_bundle(release.bundle["tools"], release.bundle["connections"], policy_origins(session, server_id))
+            discovered = {e["connection_id"]: e["tools"] for e in release.bundle.get("federated", [])}
+            connections = {cid: {**spec, "_discovered": discovered[cid]} if cid in discovered else spec for cid, spec in release.bundle["connections"].items()}
+            bundle = compile_bundle(release.bundle["tools"], connections, policy_origins(session, server_id))
         return enqueue(bundle, request.revision, role, server_id)
 
     @app.post("/api/deployments")

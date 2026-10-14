@@ -6,7 +6,9 @@ from urllib.parse import quote
 
 import httpx
 
-from . import ToolContext, pack_tool
+from . import ToolContext, pack_probe, pack_tool
+
+PROTOCOL = "webhdfs"
 
 # Tool configuration (inspector → Configuration JSON), all optional:
 #   prefix            WebHDFS path prefix on the connection, default "/webhdfs/v1"
@@ -65,6 +67,13 @@ def status_entry(status):
     return {"name": status.get("pathSuffix", ""), "type": status.get("type", "").lower(), "length": status.get("length", 0),
         "modified": datetime.fromtimestamp(status.get("modificationTime", 0) / 1000, timezone.utc).isoformat(timespec="seconds"),
         "owner": status.get("owner", ""), "group": status.get("group", ""), "permission": status.get("permission", "")}
+
+
+@pack_probe
+def probe(ctx: ToolContext) -> dict:
+    """Check that the connection answers WebHDFS requests by describing the root directory."""
+    root = call(ctx, "GET", "/", "GETFILESTATUS").json()["FileStatus"]
+    return {"ok": True, "message": f"WebHDFS answered; / is owned by {root.get('owner', '?')}"}
 
 
 @pack_tool(effect="read", requires_connection=True)

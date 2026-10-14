@@ -33,6 +33,8 @@ class Connection(Base):
     server_id: Mapped[str] = mapped_column(ForeignKey("servers.id"), index=True)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     spec: Mapped[dict] = mapped_column(JSON)
+    probe_summary: Mapped[dict | None] = mapped_column(JSON)  # last connection check
+    discovered: Mapped[list | None] = mapped_column(JSON)  # mcp connections: upstream tools found by the last check
 
 
 class ApiOrigin(Base):

@@ -10,7 +10,7 @@ from factory.gateway import KEY_HEADER, USER_HEADER, candidate, rpc, start_execu
 from factory.settings import Settings
 
 gateway = pytest.mark.skipif(not os.path.exists("/opt/mcp-factory/bin/agentgateway"), reason="agentgateway binary required")
-CONNECTION = {"name": "HDFS", "base_url": "http://mock-api:8080", "auth_mode": "none", "secret_ref": "", "proxy_principal": "", "keytab_ref": "", "doas_parameter": "doAs"}
+CONNECTION = {"name": "HDFS", "base_url": "http://mock-api:8080", "protocol": "webhdfs", "auth_mode": "none", "secret_ref": "", "proxy_principal": "", "keytab_ref": "", "doas_parameter": "doAs"}
 READ = {"list_directory", "get_file_status", "download_file"}
 FUNCTIONS = ["list_directory", "get_file_status", "make_directory", "move", "delete", "download_file", "upload_file", "copy"]
 NAMENODE = {"prefix": "/webhdfs-nn/v1", "follow_redirects": True, "pseudo_auth": True, "allow_recursive_delete": True}
