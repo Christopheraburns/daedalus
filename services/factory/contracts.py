@@ -52,6 +52,8 @@ class DeploymentRequest(Contract):
 
 class DeploymentAction(Contract):
     revision: int = Field(ge=1)
+    # Only for the first deploy: the Workbench application name, which is also its subdomain.
+    application_name: str = Field(default="", max_length=63)
 
 
 class Parameter(Contract):

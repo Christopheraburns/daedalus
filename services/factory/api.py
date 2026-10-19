@@ -166,19 +166,13 @@ def create_app(settings=None):
                 message = message.replace(token, "[REDACTED]")
         return message
 
-    # The code revision this process loaded, so "is the Builder running the code I pulled?" has an answer.
-    revision_file = ROOT / ".git" / "HEAD"
-    code_revision = "unknown"
-    try:
-        head = revision_file.read_text().strip()
-        ref = ROOT / ".git" / head[5:] if head.startswith("ref: ") else None
-        code_revision = (ref.read_text().strip() if ref and ref.is_file() else head)[:12]
-    except OSError:
-        pass
+    from .version import REVISION
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+    # Which code this process loaded and when it started, so "is the Builder running what I pulled?" has an answer.
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "application": "builder", "revision": code_revision}
+        return {"status": "ok", "application": "builder", "revision": REVISION, "started_at": started_at}
 
     @app.get("/readyz")
     def ready():
@@ -745,23 +739,35 @@ def create_app(settings=None):
 
     @app.post("/api/deployments")
     def deploy(request: DeploymentAction, server_id: str | None = Query(default=None), role=Depends(require("publisher"))):
-        from .deployment import deploy_server
+        from .deployment import deploy_server, valid_application_name
         server_id = selected(server_id)
         with sessions.begin() as session:
             server = server_lock(session, server_id); revision(server.revision, str(request.revision))
             deployment = session.scalar(select(Deployment).where(Deployment.server_id == server_id).with_for_update())
             if not server.active_release_id: raise HTTPException(422, "Publish and activate a release before deployment")
             release = get(session, Release, server.active_release_id)
+            # The application keeps its name once created (Workbench ties the subdomain to it); before that, the
+            # publisher may choose one. Names must not collide with another server's application.
+            name = deployment.application_name if deployment.application_id else (request.application_name or deployment.application_name)
+            if request.application_name and deployment.application_id and request.application_name != deployment.application_name:
+                raise HTTPException(409, "This server's application already exists; delete it to deploy under another name")
+            if name:
+                if not valid_application_name(name):
+                    raise HTTPException(422, "Application names use 3-63 lowercase letters, digits and hyphens, start with a letter and do not end with a hyphen")
+                if session.scalar(select(Deployment.id).where(Deployment.server_id != server_id, Deployment.application_name == name)):
+                    raise HTTPException(409, "Another MCP server already uses this application name")
+            application_id = deployment.application_id
             deployment.desired_release_id = release.id; deployment.status = "provisioning"; deployment.message = None; deployment.revision += 1
             audit(session, role, "deployment.request", deployment.id, release_id=release.id)
         try:
-            result = deploy_server(server_id, release.id, server.name, settings)
+            result = deploy_server(server_id, release.id, server.name, settings, application_name=name, application_id=application_id)
         except Exception as exc:
             result = {"status": "failed", "message": safe_error(exc)}
         with sessions.begin() as session:
             deployment = session.scalar(select(Deployment).where(Deployment.server_id == server_id).with_for_update())
-            deployment.status = result["status"]; deployment.application_name = result.get("application_name")
-            deployment.application_id = result.get("application_id"); deployment.endpoint = result.get("endpoint")
+            # A failed deploy keeps what is known about the application, so the next one updates the same one.
+            deployment.status = result["status"]; deployment.application_name = result.get("application_name") or deployment.application_name or name
+            deployment.application_id = result.get("application_id") or deployment.application_id; deployment.endpoint = result.get("endpoint") or deployment.endpoint
             deployment.provider = result.get("provider", settings.deployment_provider); deployment.message = result.get("message")
             if "metrics" in result: deployment.metrics = result["metrics"]
             if result["status"] == "running": deployment.deployed_release_id = release.id

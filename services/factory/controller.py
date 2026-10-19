@@ -19,6 +19,7 @@ from .compiler import compile_bundle, digest
 from .db import ApiOrigin, Release, Server, audit, database, now
 from .gateway import candidate, gateway_config, materialize_secrets, start_executor, stop_process, validate_config, verify_effective, write_atomic
 from .settings import LEGACY, MODERN, Settings
+from .version import REVISION
 
 log = logging.getLogger("factory.controller")
 
@@ -117,7 +118,7 @@ def main():
             approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
             compile_bundle(bundle["tools"], bundle["connections"], approved)
         started_at = now().isoformat()
-        runtime = {"ready": False, "gateway_started_at": started_at, "effective_release_id": None, "last_error": None}
+        runtime = {"ready": False, "gateway_started_at": started_at, "effective_release_id": None, "last_error": None, "revision": REVISION, "host": socket.gethostname()}
         try:
             # The gateway fails closed on unreachable targets, so the executor is ready before it starts.
             assets = prepare_assets(bundle, settings, release_id)

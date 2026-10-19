@@ -618,12 +618,18 @@ test('manual deployment explains itself and shows what to create in Workbench', 
   const dialog = page.getByRole('dialog', { name: 'Deployment & monitoring' });
   await expect(dialog.getByRole('button', { name: 'Deploy release' })).toBeDisabled();
   await expect(dialog).toContainText('Publish a release first');
+  // Before the first deploy the name is a choice, suggested from the server name without an ID suffix.
+  await expect(dialog.getByLabel('Application name')).toHaveValue(`deploy-${suffix.toLowerCase()}`);
+  await expect(dialog).toContainText('Builder code');
   await dialog.getByRole('button', { name: 'Close dialog' }).click();
   // The default workspace has an active release from earlier tests.
   await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption('85d30f87-b285-4d17-a89e-84bac6ac37bc');
   await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+  await dialog.getByLabel('Application name').fill(`checks-${suffix.toLowerCase()}`);
   await dialog.getByRole('button', { name: 'Deploy release' }).click();
   await expect(dialog).toContainText('Manual mode: no application was created');
+  await expect(dialog).toContainText(`checks-${suffix.toLowerCase()}`);
+  await expect(dialog.locator('.result-time')).toContainText('last result');
   await expect(dialog).toContainText('ready to deploy');
   await expect(dialog).toContainText('CREATE THE SERVER APPLICATION BY HAND');
   await expect(dialog.locator('.manifest-env')).toContainText('FACTORY_SERVER_ID=');

@@ -33,7 +33,7 @@ class FakeWorkbench:
             return httpx.Response(200, json={"applications": list(self.applications.values())})
         if request.method == "POST" and tail == "":
             body = json.loads(request.content)
-            assert body["subdomain"] == "my-mcp-server-85d30f87" and body["script"] == "mcp_server_app.py" and body["runtime_identifier"] == "registry/mcp-factory-runtime:0.1.2"
+            assert body["subdomain"] == body["name"] and body["script"] == "mcp_server_app.py" and body["runtime_identifier"] == "registry/mcp-factory-runtime:0.1.2"
             assert body["environment"]["FACTORY_SERVER_ID"] == SERVER_ID and body["cpu"] == 1 and body["memory"] == 2 and body["bypass_authentication"] is True
             application = {"id": f"app-{self.next_id}", "status": "APPLICATION_STARTING", "creator": {"username": "cburns"}, "updated_at": "2026-10-13T00:00:00Z", **body}
             self.next_id += 1
@@ -196,3 +196,31 @@ def test_builder_health_reports_the_code_revision(registry):
     client, _, _ = registry
     body = client.get("/healthz").json()
     assert body["status"] == "ok" and body["revision"] and body["revision"] != ""
+
+
+def test_the_first_deploy_chooses_the_name_and_later_deploys_follow_the_application_id(registry, workbench):
+    client, sessions, _ = registry
+    client = builder(registry)
+    activate_release(sessions)
+    rev = lambda: client.get("/api/workspace").json()["server"]["revision"]
+    assert client.post("/api/deployments", json={"revision": rev(), "application_name": "Helios_MCP"}).status_code == 422
+    other = client.post("/api/servers", json={"name": "Other"}).json()
+    with sessions.begin() as session:
+        from factory.db import Deployment
+        from sqlalchemy import select
+        session.scalar(select(Deployment).where(Deployment.server_id == other["id"])).application_name = "taken-name"
+    assert client.post("/api/deployments", json={"revision": rev(), "application_name": "taken-name"}).status_code == 409
+    created = client.post("/api/deployments", json={"revision": rev(), "application_name": "helios-mcp"}).json()
+    assert created["application_name"] == "helios-mcp" and workbench.applications["app-1"]["subdomain"] == "helios-mcp"
+    assert created["endpoint"] == "https://helios-mcp.ml-abc.example.cloudera.site/mcp"
+    assert client.post("/api/deployments", json={"revision": rev(), "application_name": "renamed"}).status_code == 409
+    # Later deploys update the same application by ID, even if it was renamed in Workbench meanwhile.
+    workbench.applications["app-1"]["name"] = "renamed-in-workbench"
+    again = client.post("/api/deployments", json={"revision": rev()}).json()
+    assert again["application_id"] == "app-1" and list(workbench.applications) == ["app-1"]
+    # A failed deploy keeps the application it knows about.
+    original = workbench.handler
+    workbench.handler = lambda request: httpx.Response(500, json={"error": "boom"}) if request.method == "PATCH" else original(request)
+    deployment.TRANSPORT = httpx.MockTransport(workbench.handler)
+    failed = client.post("/api/deployments", json={"revision": rev()}).json()
+    assert failed["status"] == "failed" and failed["application_id"] == "app-1" and failed["application_name"] == "helios-mcp"

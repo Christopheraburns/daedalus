@@ -45,8 +45,12 @@ def server_script(settings):
         return "mcp_server_app.py"
 
 
-def manifest(server_id, release_id, server_name, settings):
-    name = application_name(server_name, server_id)
+def valid_application_name(name):
+    return bool(re.fullmatch(r"[a-z][a-z0-9-]{1,61}[a-z0-9]", name or ""))
+
+
+def manifest(server_id, release_id, server_name, settings, name=None):
+    name = name or application_name(server_name, server_id)
     environment = {"FACTORY_SERVER_ID": server_id, "FACTORY_DEPLOYED_RELEASE_ID": release_id}
     if settings.cai_domain:
         environment["FACTORY_PUBLIC_MCP_URL"] = f"https://{subdomain(name)}.{settings.cai_domain}/mcp"
@@ -102,9 +106,18 @@ class ClouderaAI:
             "script": document["entrypoint"], "runtime_identifier": document["runtime_image"], "environment": document["environment"],
             "cpu": s.cai_cpu, "memory": s.cai_memory, "bypass_authentication": s.cai_bypass_auth}
 
-    def deploy(self, document):
+    def get_application(self, application_id):
+        response = self.client.get(f"{self.base}/{application_id}")
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            raise ValueError(f"Cloudera AI API returned {response.status_code} for GET applications/{application_id}: {response.text[:300]}")
+        return response.json()
+
+    def deploy(self, document, application_id=None):
         document = {**document, "runtime_image": self.runtime_identifier()}
-        existing = self.find(document["name"])
+        # The stored ID is authoritative; the name is only a fallback for applications created before IDs were kept.
+        existing = (self.get_application(application_id) if application_id else None) or self.find(document["name"])
         if existing:
             # The update call takes the Application resource, whose environment is a JSON-encoded string
             # (verified against Workbench: an object is rejected with "cannot unmarshal object into ... string").
@@ -132,14 +145,14 @@ def describe(application, settings, name):
         "message": f"Workbench application {application.get('status', 'created')}", "metrics": {"creator": (application.get("creator") or {}).get("username"), "updated_at": application.get("updated_at")}}
 
 
-def deploy_server(server_id, release_id, server_name, settings):
-    document = manifest(server_id, release_id, server_name, settings)
+def deploy_server(server_id, release_id, server_name, settings, application_name=None, application_id=None):
+    document = manifest(server_id, release_id, server_name, settings, application_name)
     if settings.deployment_provider == "manual":
         # Nothing is created; the Builder shows these values so an operator can create the application by hand.
         return {"status": "ready_to_deploy", "provider": "manual", "application_name": document["name"], "message": "Manual mode: no application was created. Create it with the values below, or set FACTORY_DEPLOYMENT_PROVIDER=cloudera-ai on the Builder application so Deploy creates it.",
             "metrics": {"manifest": {key: document[key] for key in ("name", "subdomain", "entrypoint", "runtime_image", "environment")}}}
     if settings.deployment_provider == "cloudera-ai":
-        return describe(ClouderaAI(settings).deploy(document), settings, document["name"])
+        return describe(ClouderaAI(settings).deploy(document, application_id), settings, document["name"])
     if settings.deployment_provider != "cloudera-bridge":
         raise ValueError("FACTORY_DEPLOYMENT_PROVIDER must be manual, cloudera-ai or cloudera-bridge")
     if not (settings.cloudera_api_base_url and settings.cloudera_project_id and settings.cloudera_api_token):

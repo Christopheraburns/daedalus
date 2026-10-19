@@ -132,6 +132,7 @@ def test_controller_switches_executors_between_releases(registry, monkeypatch, t
         assert client.post(f"/api/tools/{tool['id']}/test", headers={"If-Match": "1"}, json={"arguments": {"body": {"text": "ping"}}}).json()["success"]
         publish()
         first_pid = runtime()["executor_pid"]
+        assert runtime()["revision"] and runtime()["host"]  # the heartbeat says which code and pod are serving
         assert first_pid and runtime()["gateway_pid"]
         assert [t["name"] for t in catalog(url, token)] == ["echo"]
         assert unwrap(rpc(url, token, "tools/call", {"name": "echo", "arguments": {"body": {"text": "live"}}})) == {"text": "live"}
