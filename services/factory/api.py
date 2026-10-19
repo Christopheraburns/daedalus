@@ -1,6 +1,7 @@
 import hmac
 import ipaddress
 import json
+import re
 import socket
 import threading
 import time
@@ -18,7 +19,7 @@ from sqlalchemy import select, text
 from .compiler import compile_bundle, digest, fingerprint, validate_connection, validate_tool
 from . import auth, mcp_client, packs
 from .packs import Caller
-from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, LayoutSpec, PackSource, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
+from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, ServerImport, LayoutSpec, PackSource, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
 from .db import ApiOrigin, Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
 from .gateway import candidate, rpc
 from .settings import MODERN, SERVER_ID, Settings
@@ -247,6 +248,31 @@ def create_app(settings=None):
                     session.add(ApiOrigin(server_id=server.id, origin=origin, description="Environment bootstrap origin"))
             audit(session, role, "server.create", server.id, name=server.name)
             return {"id": server.id, "name": server.name, "revision": server.revision}
+
+    @app.get("/api/export")
+    def export_server(server_id: str | None = Query(default=None), role=Depends(identity)):
+        """The selected server as a portable file: no secret values, no record IDs, no release history."""
+        from .portability import export_server as build
+        with sessions() as session:
+            try:
+                document = build(session, selected(server_id))
+            except LookupError:
+                raise HTTPException(404, "Record not found")
+        slug = re.sub(r"[^a-z0-9]+", "-", document["server"]["name"].lower()).strip("-") or "mcp-server"
+        return JSONResponse(document, headers={"Content-Disposition": f'attachment; filename="{slug}.daedalus.json"'})
+
+    # Importing creates connections, origins and project pack code, all administrator actions.
+    @app.post("/api/servers/import", status_code=201)
+    def import_server(request: ServerImport, role=Depends(require())):
+        from .portability import import_server as load
+        try:
+            with sessions.begin() as session:
+                result = load(session, request.document, request.name.strip(), request.replace_packs, role, settings, settings.deployment_provider)
+        except FileExistsError as exc:
+            raise HTTPException(409, f"These project packs already exist here with different code: {exc}. Choose to replace them, or rename them in the source project")
+        except (ValueError, KeyError, TypeError, SyntaxError) as exc:
+            raise HTTPException(422, f"The export cannot be imported: {safe_error(exc)}")
+        return result
 
     @app.get("/api/workspace")
     def workspace(server_id: str | None = Query(default=None), role=Depends(identity)):

@@ -63,6 +63,8 @@ export const backendErrors: BackendError[] = [
   { en: '{name}: check the MCP connection to discover its tools before publishing', ko: '{name}: 게시하기 전에 MCP 연결을 검사하여 도구를 검색하세요', pattern: /^(?<name>.+): check the MCP connection to discover its tools before publishing$/ },
   { en: 'Manual mode: no application was created. Create it with the values below, or set FACTORY_DEPLOYMENT_PROVIDER=cloudera-ai on the Builder application so Deploy creates it.', ko: '수동 모드: 애플리케이션을 만들지 않았습니다. 아래 값으로 직접 만들거나, 배포가 직접 만들도록 빌더 애플리케이션에 FACTORY_DEPLOYMENT_PROVIDER=cloudera-ai를 설정하세요.' },
   { en: 'Recorded locally; in manual mode, manage the application in Workbench yourself.', ko: '로컬에만 기록했습니다. 수동 모드에서는 Workbench에서 애플리케이션을 직접 관리하세요.' },
+  { en: 'These project packs already exist here with different code: {packs}. Choose to replace them, or rename them in the source project', ko: '다음 프로젝트 팩이 이미 다른 코드로 존재합니다: {packs}. 바꾸기를 선택하거나 원본 프로젝트에서 이름을 바꾸세요', pattern: /^These project packs already exist here with different code: (?<packs>.+)\. Choose to replace them, or rename them in the source project$/ },
+  { en: 'The export cannot be imported: {detail}', ko: '내보내기 파일을 가져올 수 없습니다: {detail}', pattern: /^The export cannot be imported: (?<detail>[\s\S]*)$/ },
   { en: 'Candidate release failed: {detail}', ko: '후보 릴리스 실패: {detail}', pattern: /^Candidate release failed: (?<detail>[\s\S]*)$/ },
   { en: 'Could not load OpenAPI document: {detail}', ko: 'OpenAPI 문서를 불러올 수 없습니다: {detail}', pattern: /^Could not load OpenAPI document: (?<detail>[\s\S]*)$/ },
   { en: 'Unknown tool pack: {name}', ko: '알 수 없는 도구 팩입니다: {name}', pattern: /^Unknown tool pack: (?<name>.*)$/ },

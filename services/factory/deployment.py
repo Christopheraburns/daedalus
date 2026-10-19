@@ -106,7 +106,10 @@ class ClouderaAI:
         document = {**document, "runtime_image": self.runtime_identifier()}
         existing = self.find(document["name"])
         if existing:
-            application = self.request("PATCH", f"/{existing['id']}", json=self.body(document))
+            # The update call takes the Application resource, whose environment is a JSON-encoded string
+            # (verified against Workbench: an object is rejected with "cannot unmarshal object into ... string").
+            update = {**self.body(document), "environment": json.dumps(document["environment"])}
+            application = self.request("PATCH", f"/{existing['id']}", json=update)
             self.request("POST", f"/{existing['id']}:restart")
             return application or existing
         return self.request("POST", json=self.body(document))

@@ -46,7 +46,10 @@ class FakeWorkbench:
         if request.method == "GET":
             return httpx.Response(200, json=application)
         if request.method == "PATCH":
-            application.update(json.loads(request.content))
+            body = json.loads(request.content)
+            if not isinstance(body.get("environment", ""), str):  # what the real API answered
+                return httpx.Response(400, json={"error": "json: cannot unmarshal object into Go value of type string", "code": 3})
+            application.update({**body, "environment": json.loads(body["environment"]) if body.get("environment") else application["environment"]})
             return httpx.Response(200, json=application)
         if request.method == "POST" and tail.endswith(":restart"):
             application["status"] = "APPLICATION_RUNNING"

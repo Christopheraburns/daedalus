@@ -659,3 +659,50 @@ test('the deploy dialog follows a provisioning application until it runs', async
   expect(url!.x - (label!.x + label!.width)).toBeGreaterThanOrEqual(12);
   await expect(dialog).toContainText('Server health');
 });
+
+test('a server exports to a file and imports as a new server', async ({ page }) => {
+  const headers = { Authorization: `Bearer ${admin}` };
+  const api = 'http://127.0.0.1:18000/api';
+  const source = await (await page.request.post(`${api}/servers`, { headers, data: { name: `Portable ${suffix}` } })).json();
+  await page.request.post(`${api}/tools?server_id=${source.id}`, { headers, data: { name: 'portable_echo', description: 'Echo for the export test.', kind: 'python', pack: 'demo', function: 'echo' } });
+  await login(page);
+  await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption(source.id);
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Export', exact: true }).click()]);
+  expect(download.suggestedFilename()).toBe(`portable-${suffix.toLowerCase()}.daedalus.json`);
+  const file = await download.path();
+  await page.locator('input[type="file"]').setInputFiles(file!);
+  const dialog = page.getByRole('dialog', { name: 'Import an MCP server' });
+  await expect(dialog).toContainText('1 tools, 0 connections, 0 project packs');
+  await dialog.getByLabel('Name for the new server').fill(`Portable copy ${suffix}`);
+  await dialog.getByRole('button', { name: 'Import server' }).click();
+  await expect(dialog.getByRole('status')).toContainText(`Imported Portable copy ${suffix} with 1 tools`);
+  await expect(dialog).toContainText('None: this server uses no stored secrets.');
+  await dialog.getByRole('button', { name: 'Open the imported server' }).click();
+  await expect(dialog).not.toBeVisible();
+  const picker = page.getByRole('combobox', { name: 'MCP server workspace' });
+  await expect(picker.locator('option:checked')).toHaveText(`Portable copy ${suffix}`);
+  await page.getByRole('button', { name: 'List', exact: true }).click();
+  await expect(page.locator('.table-row').filter({ hasText: 'portable_echo' })).toBeVisible();
+  // A file that is not an export is refused with a reason, in the dialog.
+  await page.locator('input[type="file"]').setInputFiles({ name: 'other.json', mimeType: 'application/json', buffer: Buffer.from('{"format":"something-else"}') });
+  await expect(dialog.getByRole('alert')).toContainText('not a Daedalus server export');
+  await expect(dialog.getByRole('button', { name: 'Import server' })).toBeDisabled();
+});
+
+test('an API older than the page is explained instead of showing a raw error', async ({ page }) => {
+  await page.route('**/api/workspace*', async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.deployment = { ...body.deployment, provider: 'cloudera-ai', status: 'provisioning', application_id: 'app-1', application_name: 'my-mcp-server-85d30f87' };
+    await route.fulfill({ response, json: body });
+  });
+  let calls = 0;
+  await page.route('**/api/deployments/live*', async route => { calls += 1; await route.fulfill({ status: 405, json: { detail: 'Method Not Allowed' } }); });
+  await login(page);
+  await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Deployment & monitoring' });
+  await expect(dialog).toContainText('Restart the Builder application to finish updating');
+  await expect(dialog).not.toContainText('Method Not Allowed');
+  await page.waitForTimeout(6000);
+  expect(calls).toBe(1); // it stops asking
+});

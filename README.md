@@ -173,6 +173,21 @@ binding; verify the deployment's ingress requirements before overriding
 only. Actual Workbench ingress, registration, authentication, and MCP protocol
 qualification remain unverified; see [compatibility.yaml](compatibility.yaml).
 
+## Export and import
+
+**Export** (header, any role) downloads the selected server as
+`<name>.daedalus.json` (format `daedalus-server/v1`): approved origins,
+connections with secret *names* only, tools, canvas layout, MCP connections'
+discovered tools, and the source of the project packs its tools use. Record IDs
+are replaced by references (`c1`, `t1`, …) and records are listed by name, so the
+same server always exports to the same file. **Import** (administrators) creates
+a new server workspace from a file: fresh IDs, imported tools untested, project
+packs written to this project (a pack with different code is replaced only when
+you choose to), and a list of the secrets to set on the Server application.
+Release history is not carried over: test and publish in the new environment.
+The API equivalents are `GET /api/export?server_id=…` and
+`POST /api/servers/import`.
+
 ## Languages
 
 The Builder is available in English and Korean. The selector next to the signed-in

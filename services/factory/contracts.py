@@ -32,6 +32,12 @@ class ServerSpec(Contract):
     name: str = Field(min_length=1, max_length=80)
 
 
+class ServerImport(Contract):
+    document: dict
+    name: str = Field(default="", max_length=80)
+    replace_packs: bool = False
+
+
 class PackSource(Contract):
     source: str = Field(min_length=1, max_length=65536)
 
