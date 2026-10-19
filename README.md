@@ -200,7 +200,20 @@ example one built by Daedalus. Checking it discovers its tools; with *Serve this
 server's tools from here* enabled, releases include them as an agentgateway
 `mcp` target behind this server's authentication, and tool names must stay
 unique across local and federated tools. The upstream must speak the client's
-MCP protocol profile, because agentgateway forwards it unchanged. Each connection also has an `auth_mode` (see [services/factory/auth.py](services/factory/auth.py)):
+MCP protocol profile, because agentgateway forwards it unchanged.
+
+**MCP tools.** To use *some* tools of another MCP server, or to rename,
+re-describe or reclassify them, add them individually instead: each tool listed
+under an `mcp` connection in the palette (click, drag or **Add all**) becomes a
+`kind: mcp` tool node with its own name, description and read/write effect. Its
+input schema is copied from the connection's discovery. Calls run in the
+executor through Daedalus's own MCP client, which speaks the latest protocol
+profile and falls back to the earlier session-based profile, so servers built on
+older SDKs work too. The connection's credentials and the caller's identity are
+applied per call, and results that arrive as a single JSON text block are
+returned as structured data. Upstream servers that nest inputs under `body`
+(agentgateway, so any Daedalus server) are unwrapped automatically. The mock
+API hosts an SDK-built upstream at `http://mock-api:8080/upstream/mcp`. Each connection also has an `auth_mode` (see [services/factory/auth.py](services/factory/auth.py)):
 
 | Mode | What a tool call sends to the API | Where the credential lives |
 | --- | --- | --- |

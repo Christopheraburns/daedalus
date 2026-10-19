@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 import anyio
+import httpx
 from jsonschema import Draft202012Validator, ValidationError
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -23,7 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import packs
+from . import auth, mcp_client, packs
 from .gateway import KEY_HEADER, TOKEN_HEADER, USER_HEADER
 
 MAX_RESULT = 1024 * 1024
@@ -55,12 +56,41 @@ def materialize(bundle, directory):
     return folder
 
 
+def call_upstream(name, wrap_body, context, arguments):
+    """An MCP tool: call the upstream server as the caller, with the connection's credentials."""
+    if wrap_body:
+        arguments = {"body": arguments} if arguments else {}
+    headers, params = auth.credentials(context.connection, context.caller)
+    url = str(httpx.URL(context.connection["base_url"], params=params)) if params else context.connection["base_url"]
+    with mcp_client.Client(url, headers, timeout=7.5) as client:
+        result = client.call_tool(name, arguments)
+    if result.get("isError"):
+        text = " ".join(c.get("text", "") for c in result.get("content", []) if isinstance(c, dict))
+        raise ValueError(f"Upstream tool {name} failed: {text[:500] or 'no detail'}")
+    if isinstance(result.get("structuredContent"), dict):
+        return result["structuredContent"]
+    content = result.get("content", [])
+    # Many servers send a JSON object only as text; hand it to the agent as structured data.
+    if len(content) == 1 and content[0].get("type") == "text":
+        try:
+            parsed = json.loads(content[0].get("text", ""))
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    return {"content": content}
+
+
 def build_app(bundle, key, default_user="development", directory="."):
     tools = {}
     search = [materialize(bundle, directory)]
     for tool in bundle.get("python_tools", []):
-        function = packs.resolve(tool["pack"], tool["function"], search)
         connection = bundle["connections"].get(tool["connection_id"]) if tool.get("connection_id") else None
+        if tool.get("kind") == "mcp":
+            function = functools.partial(call_upstream, tool["upstream_tool"], tool.get("wrap_body", False))
+        else:
+            pack_function = packs.resolve(tool["pack"], tool["function"], search)
+            function = lambda context, arguments, f=pack_function: f(context, **arguments)
         tools[tool["name"]] = (tool, function, connection, Draft202012Validator(tool["input_schema"]))
 
     async def call(request):
@@ -76,7 +106,7 @@ def build_app(bundle, key, default_user="development", directory="."):
             return JSONResponse({"error": "Invalid arguments: " + str(exc).split("\n")[0][:300]}, status_code=422)
         context = packs.ToolContext(caller=caller_from(request, default_user), connection=connection, config=dict(tool.get("config", {})))
         try:
-            result = await anyio.to_thread.run_sync(functools.partial(function, context, **arguments))
+            result = await anyio.to_thread.run_sync(functools.partial(function, context, arguments))
             payload = json.dumps(result)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)[:600]}, status_code=422)

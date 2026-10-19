@@ -4,7 +4,47 @@ import threading
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Daedalus fixtures")
+from contextlib import asynccontextmanager
+
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
+
+# An upstream MCP server built on the Python SDK: earlier protocol profile with initialize and
+# session ids, so tests exercise Daedalus's fallback. Served at /upstream/mcp.
+upstream = FastMCP("fixture-upstream", stateless_http=False, transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+
+
+@upstream.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def add(a: int, b: int) -> int:
+    """Add two integers."""
+    return a + b
+
+
+@upstream.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def lookup_ticket(ticket_id: str) -> dict:
+    """Look up a support ticket by its identifier."""
+    if ticket_id == "missing":
+        raise ValueError("Ticket not found")
+    return {"id": ticket_id, "title": "Replace workstation", "status": "open"}
+
+
+@upstream.tool()
+def file_ticket(title: str, priority: str = "normal") -> dict:
+    """File a new support ticket."""
+    return {"id": "T-900", "title": title, "priority": priority}
+
+
+upstream_app = upstream.streamable_http_app()
+
+
+@asynccontextmanager
+async def lifespan(_):
+    async with upstream.session_manager.run():
+        yield
+
+app = FastAPI(title="Daedalus fixtures", lifespan=lifespan)
+app.mount("/upstream", upstream_app)
 counter_lock = threading.Lock()
 calls = {"inventory": 0, "tickets": 0}
 tickets = []
@@ -48,6 +88,12 @@ def create_ticket(body: Ticket):
 def echo(request: Request):
     """What the backend received: lets tests confirm which credential a connection sent."""
     return {"authorization": request.headers.get("authorization"), "query": dict(request.query_params)}
+
+
+@app.post("/ratelimited/mcp")
+def rate_limited():
+    """An MCP endpoint behind a rate-limiting proxy: a plain HTTP error, not a JSON-RPC reply."""
+    return JSONResponse({"title": "Error 1015: You are being rate limited", "status": 429, "detail": "Wait and retry."}, status_code=429, headers={"Retry-After": "30"})
 
 
 @app.get("/fixture/counters")

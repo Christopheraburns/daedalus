@@ -57,9 +57,9 @@ def credentials(connection, caller, environ=None):
             raise ValueError(f"Secret {connection['secret_ref']} is not set in the Server application's environment")
         return {"Authorization": f"Bearer {value}"}, {}
     if mode == "forward-token":
-        if not caller.token:
-            raise ValueError("This connection forwards the caller's token, but the request carried none")
-        return {"Authorization": f"Bearer {caller.token}"}, {}
+        # Live servers with caller identity always have a token; Builder tests and loopback probes run without
+        # one, and like REST tools they send no credential rather than inventing one.
+        return ({"Authorization": f"Bearer {caller.token}"}, {}) if caller.token else ({}, {})
     if mode == "s3-sigv4":
         return {}, {}  # signing happens per request; see s3_auth()
     if mode == "proxy-doas":

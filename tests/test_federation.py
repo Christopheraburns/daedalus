@@ -66,7 +66,7 @@ def test_federated_mcp_connection_discovers_and_serves_upstream_tools(registry, 
         # Federated but not yet checked: publishing is blocked with a clear reason.
         assert any("check the MCP connection" in p for p in client.get("/api/releases/preview").json()["problems"])
         checked = check(client, helios)
-        assert checked["probe_summary"]["success"] and checked["probe_summary"]["message"] == "2 tools discovered"
+        assert checked["probe_summary"]["success"] and checked["probe_summary"]["message"].startswith("2 tools discovered")
         assert [t["name"] for t in checked["discovered"]] == ["echo", "whoami"] and "upstream" in checked["discovered"][0]["description"]
         preview = client.get("/api/releases/preview").json()
         assert preview["problems"] == [] and preview["added"] == ["echo", "whoami"]

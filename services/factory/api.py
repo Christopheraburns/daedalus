@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,11 +16,12 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import select, text
 
 from .compiler import compile_bundle, digest, fingerprint, validate_connection, validate_tool
-from . import packs
+from . import auth, mcp_client, packs
+from .packs import Caller
 from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, LayoutSpec, PackSource, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
 from .db import ApiOrigin, Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
 from .gateway import candidate, rpc
-from .settings import SERVER_ID, Settings
+from .settings import MODERN, SERVER_ID, Settings
 
 
 def create_app(settings=None):
@@ -138,6 +140,8 @@ def create_app(settings=None):
             for c in session.scalars(select(Connection).where(Connection.server_id == server_id)):
                 if c.spec.get("protocol") == "mcp" and c.spec.get("federate") and not (c.probe_summary or {}).get("success"):
                     problems.append(f"{c.spec['name']}: check the MCP connection to discover its tools before publishing")
+                elif c.spec.get("protocol") == "mcp" and c.spec.get("federate") and (c.probe_summary or {}).get("federation_ok") is False:
+                    problems.append(f"{c.spec['name']}: cannot be federated because it does not implement server/discover; turn off \"Serve this server's tools from here\" and add its tools individually")
         return problems
 
     def federated_names(bundle):
@@ -382,17 +386,35 @@ def create_app(settings=None):
                 raise HTTPException(422, str(exc))
         return connection
 
+    def tool_data(session, spec, server_id):
+        """The stored tool spec. MCP tools take their input schema from the connection's discovery,
+        never from the client, so a release always matches what the upstream advertised."""
+        connection = tool_connection(session, spec, server_id)
+        data = spec.model_dump()
+        if spec.kind == "mcp":
+            if connection is None or connection.spec.get("protocol") != "mcp":
+                raise HTTPException(422, "MCP tools need an mcp connection")
+            found = next((t for t in connection.discovered or [] if t["name"] == spec.upstream_tool), None)
+            if found is None:
+                raise HTTPException(422, f"{connection.spec['name']} has no discovered tool named {spec.upstream_tool}; check the connection again")
+            data["input_schema"], data["wrap_body"] = found["input_schema"], bool(found.get("wrap_body"))
+            try:
+                validate_tool(data, connection.spec, policy_origins(session, server_id))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
+        return data
+
     @app.post("/api/tools", status_code=201)
     def create_tool(spec: ToolSpec, server_id: str | None = Query(default=None), role=Depends(require("author"))):
         with sessions.begin() as session:
             server_id = selected(server_id); server = server_lock(session, server_id)
-            tool_connection(session, spec, server_id)
+            data = tool_data(session, spec, server_id)
             tools = list(session.scalars(select(Tool).where(Tool.server_id == server_id)))
             if len(tools) >= 100:
                 raise HTTPException(422, "This profile supports at most 100 tools")
             if any(t.spec["name"] == spec.name for t in tools):
                 raise HTTPException(409, "Tool name is already in use")
-            item = Tool(server_id=server_id, spec=spec.model_dump(), connection_id=spec.connection_id)
+            item = Tool(server_id=server_id, spec=data, connection_id=spec.connection_id)
             session.add(item)
             session.flush()
             server.revision += 1
@@ -406,10 +428,10 @@ def create_app(settings=None):
             item = get(session, Tool, id)
             if item.server_id != server_id: raise HTTPException(404, "Record not found")
             revision(item.revision, if_match)
-            tool_connection(session, spec, server_id)
+            data = tool_data(session, spec, server_id)
             if any(t.id != id and t.spec["name"] == spec.name for t in session.scalars(select(Tool).where(Tool.server_id == server_id))):
                 raise HTTPException(409, "Tool name is already in use")
-            item.spec, item.connection_id = spec.model_dump(), spec.connection_id
+            item.spec, item.connection_id = data, spec.connection_id
             item.revision += 1
             server.revision += 1
             audit(session, role, "tool.update", id)
@@ -447,10 +469,16 @@ def create_app(settings=None):
             discovered = None
             try:
                 if protocol == "mcp":
-                    bundle = compile_bundle([], {id: {**spec, "federate": True, "_discovered": []}}, origins)
-                    with candidate(bundle, settings, discover=True) as (url, token, tools):
-                        discovered = [{"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("inputSchema", {})} for t in tools]
-                    summary = {"success": True, "message": f"{len(discovered)} tools discovered", "pack": None}
+                    validate_connection(spec, origins)
+                    headers, params = auth.credentials(spec, Caller("builder"))
+                    url = str(httpx.URL(spec["base_url"], params=params)) if params else spec["base_url"]
+                    discovered, profile = mcp_client.discover(url, headers)
+                    summary = {"success": True, "message": f"{len(discovered)} tools discovered ({'protocol ' + MODERN if profile == 'modern' else 'protocol ' + str(profile)})", "pack": None}
+                    if spec.get("federate"):
+                        # Federation goes through agentgateway, which starts every request with server/discover.
+                        summary["federation_ok"] = profile == "modern" and mcp_client.supports_discover(url, headers)
+                        if not summary["federation_ok"]:
+                            summary["message"] += "; it cannot be federated (no server/discover on protocol " + MODERN + "), add its tools individually instead"
                 else:
                     available = packs.probes(protocol)
                     if not available:
@@ -542,19 +570,46 @@ def create_app(settings=None):
                 if tool.spec["effect"] == "write" and not request.confirm_write:
                     raise HTTPException(422, "Confirm the live write test explicitly")
                 tool_data = {"id": tool.id, "revision": tool.revision, "spec": {**tool.spec, "enabled": True}, "fingerprint": fp}
-                bundle = compile_bundle([tool_data], {tool.connection_id: conn} if conn else {}, policy_origins(session, server_id))
+                # A tool test covers this tool only; a federated connection's whole server is not part of it.
+                isolated = {**conn, "federate": False} if conn and conn.get("protocol") == "mcp" else conn
+                bundle = compile_bundle([tool_data], {tool.connection_id: isolated} if conn else {}, policy_origins(session, server_id))
             started = time.monotonic()
+            log = []
+
+            def event(code, level="info", **values):
+                # Values are redacted like errors; the UI renders each code in the selected language.
+                log.append({"t": round((time.monotonic() - started) * 1000), "level": level, "code": code,
+                    "values": {k: safe_error(Exception(str(v)))[:600] for k, v in values.items()}})
+
+            kind = tool_data["spec"].get("kind", "http")
+            event("bundle_compiled", name=tool_data["spec"]["name"], kind=kind, connection=(conn or {}).get("name", "-"))
             try:
-                with candidate(bundle, settings) as (url, token, tools):
+                with candidate(bundle, settings, events=event) as (url, token, tools):
                     Draft202012Validator(tools[0]["inputSchema"]).validate(request.arguments)
+                    event("arguments_validated")
+                    event("calling_tool", name=tool_data["spec"]["name"])
+                    called = time.monotonic()
                     result = rpc(url, token, "tools/call", {"name": tool_data["spec"]["name"], "arguments": request.arguments})
+                    elapsed = round((time.monotonic() - called) * 1000)
+                    structured = result.get("structuredContent")
                     success = not result.get("isError", False)
+                    if isinstance(structured, dict) and set(structured) == {"error"}:
+                        # Packs and MCP tools report failures this way (the gateway does not set isError); a test
+                        # that ends in an error must not qualify the tool for publishing.
+                        success = False
+                        event("tool_reported_error", level="error", ms=elapsed, message=structured["error"])
+                    elif success:
+                        event("tool_returned", level="success", ms=elapsed)
+                    else:
+                        event("tool_failed", level="error", ms=elapsed)
                     # Remove temporary candidate credentials if a backend echoes them.
                     result = json.loads(safe_error_json(result, token))
                 outcome = {"success": success, "result": result, "input_schema": tools[0]["inputSchema"]}
             except Exception as exc:
                 outcome = {"success": False, "error": safe_error(exc)}
+                event("test_failed", level="error", message=outcome["error"])
             outcome["duration_ms"] = round((time.monotonic() - started) * 1000)
+            outcome["log"] = log
             with sessions.begin() as session:
                 server_lock(session, server_id)
                 current = get(session, Tool, id)
@@ -701,6 +756,12 @@ def create_app(settings=None):
     if (settings.ui_dir / "help").exists():
         # In-app help pages shipped with the UI build (apps/builder-ui/public/help).
         app.mount("/help", StaticFiles(directory=settings.ui_dir / "help", html=True), name="help")
+
+    @app.get("/favicon.svg")
+    def favicon():
+        if (settings.ui_dir / "favicon.svg").exists():
+            return FileResponse(settings.ui_dir / "favicon.svg", media_type="image/svg+xml")
+        raise HTTPException(404, "Record not found")
 
     @app.get("/")
     def index():

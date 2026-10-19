@@ -28,6 +28,15 @@ async function login(page: Page, token = admin, url = '/') {
   await expect(page.getByRole('heading', { name: 'My MCP server' })).toBeVisible();
 }
 
+/** Packs are collapsed by default; open one (idempotently) and return its group. */
+async function openPack(page: Page, name: string) {
+  const group = page.locator('.pack-group').filter({ has: page.getByRole('button', { name: `Show or hide the ${name} pack` }) });
+  const toggle = group.getByRole('button', { name: `Show or hide the ${name} pack` });
+  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  return group;
+}
+
 async function workspace(page: Page) {
   const response = await page.request.get('http://127.0.0.1:18000/api/workspace', { headers: { Authorization: `Bearer ${admin}` } });
   expect(response.ok()).toBeTruthy();
@@ -190,8 +199,13 @@ test('create, inspect and test Python pack tools from the palette', async ({ pag
   // fetch_json needs an API connection; make sure one exists so "Add all" creates every demo tool.
   const connection = await page.request.post('http://127.0.0.1:18000/api/connections', { headers: { Authorization: `Bearer ${admin}` }, data: { name: `Pack APIs ${suffix}`, base_url: 'http://mock-api:8080' } });
   expect(connection.ok()).toBeTruthy();
-  const demo = page.locator('.pack-group').filter({ hasText: 'demo' });
-  await expect(demo).toBeVisible();
+  const demo = await openPack(page, 'demo');
+  await expect(demo.getByRole('button', { name: /^READ whoami/ })).toBeVisible();
+  // Collapsing hides the tools but keeps the header and Add all.
+  await demo.getByRole('button', { name: 'Show or hide the demo pack' }).click();
+  await expect(demo.getByRole('button', { name: /^READ whoami/ })).toHaveCount(0);
+  await expect(demo.getByRole('button', { name: 'Add all', exact: true })).toBeVisible();
+  await openPack(page, 'demo');
   await demo.getByRole('button', { name: /^READ echo/ }).click();
   await expect(page.getByLabel('Tool name', { exact: true })).toHaveValue(/^echo/);
   await expect(page.locator('.inspector')).toContainText('PYTHON TOOL');
@@ -232,7 +246,7 @@ test('administrators write a project pack in the browser and use its tools', asy
   await editor.getByRole('button', { name: 'Save pack', exact: true }).click();
   await expect(editor).not.toBeVisible();
   await expect(page.locator('.message-bar')).toContainText(`Pack ${packName} saved with greet`);
-  const group = page.locator('.pack-group').filter({ hasText: packName });
+  const group = await openPack(page, packName);
   await expect(group).toContainText('project');
   await group.getByRole('button', { name: 'View code' }).click();
   await expect(page.getByRole('dialog', { name: `${packName} pack` })).toContainText('def greet');
@@ -323,7 +337,7 @@ test('connections are typed by protocol and the canvas only links compatible too
     for (const t of (await workspace(page)).tools.filter((t: { connection_id: string | null }) => t.connection_id === c.id)) await page.request.delete(`http://127.0.0.1:18000/api/tools/${t.id}`, { headers: { ...headers, 'If-Match': String(t.revision) } });
     await page.request.delete(`http://127.0.0.1:18000/api/connections/${c.id}`, { headers: { ...headers, 'If-Match': String(c.revision) } });
   }
-  const hdfs = page.locator('.pack-group').filter({ hasText: 'hdfs' });
+  const hdfs = await openPack(page, 'hdfs');
   await expect(hdfs).toContainText('Needs a WebHDFS');
   await hdfs.getByRole('button', { name: 'Add all', exact: true }).click();
   await expect(page.locator('.message-bar')).toContainText('need a WebHDFS');
@@ -397,4 +411,200 @@ test('saving a connection checks it and the verdict shows in the inspector and o
   await expect(page.locator('.message-bar')).toContainText('WebHDFS answered', { timeout: 30_000 });
   expect(errors).toEqual([]);
   await page.request.delete(`http://127.0.0.1:18000/api/connections/${connection.id}`, { headers: { Authorization: `Bearer ${admin}`, 'If-Match': String(connection.revision) } });
+});
+
+test('the selected tool is removed from the canvas toolbar', async ({ page }) => {
+  await login(page);
+  const demo = await openPack(page, 'demo');
+  await demo.getByRole('button', { name: /^READ whoami/ }).click();
+  const toolbar = page.locator('.canvas-toolbar');
+  const remove = toolbar.getByRole('button', { name: 'Remove tool' });
+  await expect(remove).toBeEnabled();
+  await expect(page.locator('.inspector').getByRole('button', { name: 'Remove tool' })).toHaveCount(0);
+  await page.getByRole('textbox', { name: 'Description', exact: true }).fill('Unsaved edit.');
+  await expect(remove).toBeDisabled(); // unsaved inspector changes come first
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+  const before = (await workspace(page)).tools.filter((t: { pack?: string }) => t.pack === 'demo').length;
+  page.once('dialog', dialog => void dialog.accept());
+  await remove.click();
+  await expect.poll(async () => (await workspace(page)).tools.filter((t: { pack?: string }) => t.pack === 'demo').length).toBe(before - 1);
+  await expect(toolbar.getByRole('button', { name: 'Remove tool' })).toHaveCount(0); // nothing selected any more
+});
+
+test('setup steps check off as the canvas progresses and uncheck when tools or connections are removed', async ({ page }) => {
+  const headers = { Authorization: `Bearer ${admin}` };
+  const api = 'http://127.0.0.1:18000/api';
+  const step = (label: string) => page.locator('.workflow-steps [role="checkbox"]').filter({ hasText: label });
+  // Steps 2-4 in the default workspace: start from a canvas with no included tools.
+  for (const t of (await workspace(page)).tools.filter((t: { enabled: boolean }) => t.enabled)) {
+    const { id, revision, validated, tested, published, test_summary, ...spec } = t;
+    expect((await page.request.patch(`${api}/tools/${id}`, { headers: { ...headers, 'If-Match': String(revision) }, data: { ...spec, enabled: false } })).ok()).toBeTruthy();
+  }
+  await login(page);
+  await expect(page.locator('.workflow-steps .section-label')).toHaveText('STEPS TO CREATE YOUR MCP SERVER');
+  for (const label of ['Configure a tool', 'Validate and test', 'Review and publish']) await expect(step(label)).toHaveAttribute('aria-checked', 'false');
+  const tool = await (await page.request.post(`${api}/tools`, { headers, data: { name: `steps_${suffix}`, description: 'Steps check tool.', kind: 'python', pack: 'demo', function: 'whoami' } })).json();
+  await expect(step('Configure a tool')).toHaveAttribute('aria-checked', 'true');
+  await expect(step('Validate and test')).toHaveAttribute('aria-checked', 'false');
+  expect((await (await page.request.post(`${api}/tools/${tool.id}/test`, { headers: { ...headers, 'If-Match': '1' }, data: { arguments: {} } })).json()).success).toBeTruthy();
+  await expect(step('Validate and test')).toHaveAttribute('aria-checked', 'true');
+  const preview = await (await page.request.get(`${api}/releases/preview`, { headers })).json();
+  expect(preview.problems).toEqual([]);
+  expect((await page.request.post(`${api}/releases`, { headers, data: { revision: preview.revision } })).status()).toBe(202);
+  await expect(step('Review and publish')).toHaveAttribute('aria-checked', 'true', { timeout: 30_000 });
+  // Removing the only included tool unchecks every step that depended on it.
+  await page.getByRole('button', { name: 'List', exact: true }).click();
+  await page.locator('.table-row').filter({ hasText: `steps_${suffix}` }).click();
+  page.once('dialog', dialog => void dialog.accept());
+  await page.locator('.canvas-toolbar').getByRole('button', { name: 'Remove tool' }).click();
+  for (const label of ['Configure a tool', 'Validate and test', 'Review and publish']) await expect(step(label)).toHaveAttribute('aria-checked', 'false');
+  // Step 1 in a fresh server workspace: adding and removing its only connection.
+  const server = await (await page.request.post(`${api}/servers`, { headers, data: { name: `Steps ${suffix}` } })).json();
+  await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption(server.id);
+  await expect(step('Connect an API')).toHaveAttribute('aria-checked', 'false');
+  const connection = await (await page.request.post(`${api}/connections?server_id=${server.id}`, { headers, data: { name: 'Steps API', base_url: 'http://mock-api:8080' } })).json();
+  await expect(step('Connect an API')).toHaveAttribute('aria-checked', 'true');
+  await page.getByRole('button', { name: 'Canvas', exact: true }).click();
+  await page.locator(`.react-flow__node[data-id="${connection.id}"]`).click();
+  await expect(page.locator('.inspector').getByRole('button', { name: 'Remove connection' })).toHaveCount(0);
+  page.once('dialog', dialog => void dialog.accept());
+  await page.locator('.canvas-toolbar').getByRole('button', { name: 'Remove connection' }).click();
+  await expect(step('Connect an API')).toHaveAttribute('aria-checked', 'false');
+  await expect(step('Connect an API')).toHaveAttribute('title', /at least one connection/);
+});
+
+test('tools from another MCP server are added individually and tested through the executor', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  // MCP servers have their own palette section and connect button, next to Connections and Tool Packs.
+  await page.getByRole('button', { name: 'Connect an MCP server' }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Connect an MCP server' });
+  await expect(dialog.getByLabel('Protocol')).toHaveValue('mcp');
+  await dialog.getByLabel('Connection name').fill(`Upstream MCP ${suffix}`);
+  await dialog.getByLabel('Base URL').fill('http://mock-api:8080/upstream/mcp');
+  await dialog.getByRole('button', { name: 'Save connection' }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator('.message-bar')).toContainText('3 tools discovered (protocol 2025-11-25)', { timeout: 30_000 });
+  const group = page.locator('.connection-group').filter({ hasText: `Upstream MCP ${suffix}` });
+  await expect(group.getByRole('button', { name: /READ add/ })).toBeVisible();
+  // Listed under MCP SERVERS, after every REST/WebHDFS/S3 connection and before TOOL PACKS.
+  const order = await page.locator('.palette').evaluate(el => [...el.querySelectorAll('.section-label, .connection-group strong')].map(n => n.textContent?.trim()));
+  const mcpHeading = order.findIndex(s => s?.startsWith('MCP SERVERS'));
+  expect(mcpHeading).toBeGreaterThan(order.findIndex(s => s?.startsWith('CONNECTIONS')));
+  expect(order.indexOf(`Upstream MCP ${suffix}`)).toBeGreaterThan(mcpHeading);
+  expect(order.indexOf(`Upstream MCP ${suffix}`)).toBeLessThan(order.findIndex(s => s?.startsWith('TOOL PACKS')));
+  await expect(group.getByRole('button', { name: /WRITE file_ticket/ })).toBeVisible();
+  await expect(group).not.toContainText('Custom operation');
+  await group.getByRole('button', { name: /READ add/ }).click();
+  await expect(page.locator('.inspector')).toContainText('MCP TOOL');
+  await expect(page.locator('.inspector')).toContainText('Add two integers.');
+  await expect(page.getByLabel('Tool name', { exact: true })).toHaveValue(/^add/);
+  await runTest(page);
+  await expect(page.locator('.result-output')).toContainText('"result": 2');
+  await page.getByRole('button', { name: 'Close playground' }).click();
+  await page.locator('.inspector').getByRole('button', { name: 'View input schema' }).click();
+  await expect(page.getByRole('dialog', { name: 'add input schema' })).toContainText('"required"');
+  await page.getByRole('dialog', { name: 'add input schema' }).getByRole('button', { name: 'Close dialog' }).click();
+  await group.getByRole('button', { name: 'Add all', exact: true }).click();
+  await expect(page.locator('.message-bar')).toContainText('2 tools added');
+  const added = (await workspace(page)).tools.filter((t: { kind?: string; connection_id: string | null }) => t.kind === 'mcp');
+  expect(added.map((t: { upstream_tool: string }) => t.upstream_tool).sort()).toEqual(['add', 'file_ticket', 'lookup_ticket']);
+  expect(added.find((t: { upstream_tool: string }) => t.upstream_tool === 'file_ticket').effect).toBe('write');
+  expect(errors).toEqual([]);
+  const headers = { Authorization: `Bearer ${admin}` };
+  for (const t of added) await page.request.delete(`http://127.0.0.1:18000/api/tools/${t.id}`, { headers: { ...headers, 'If-Match': String(t.revision) } });
+});
+
+test('switching MCP servers clears the inspector and the selection', async ({ page }) => {
+  const headers = { Authorization: `Bearer ${admin}` };
+  const api = 'http://127.0.0.1:18000/api';
+  const tool = await (await page.request.post(`${api}/tools`, { headers, data: { name: `switch_${suffix}`, description: 'Selected before switching.', kind: 'python', pack: 'demo', function: 'echo' } })).json();
+  const other = await (await page.request.post(`${api}/servers`, { headers, data: { name: `Switch target ${suffix}` } })).json();
+  await login(page);
+  const picker = page.getByRole('combobox', { name: 'MCP server workspace' });
+  const home = await picker.inputValue();
+  await page.getByRole('button', { name: 'List', exact: true }).click();
+  await page.locator('.table-row').filter({ hasText: `switch_${suffix}` }).click();
+  await expect(page.getByLabel('Tool name', { exact: true })).toHaveValue(`switch_${suffix}`);
+  await page.getByRole('button', { name: 'Test tool', exact: true }).click();
+  await expect(page.locator('.test-drawer')).toBeVisible();
+  await picker.selectOption(other.id);
+  await expect(page.getByRole('heading', { name: 'Your server, at a glance.' })).toBeVisible();
+  await expect(page.getByLabel('Tool name', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.test-drawer')).toHaveCount(0);
+  await expect(page.locator('.canvas-toolbar').getByRole('button', { name: 'Remove tool' })).toHaveCount(0);
+  // Unsaved edits are not dropped silently: cancelling the switch keeps them.
+  await picker.selectOption(home);
+  await page.locator('.table-row').filter({ hasText: `switch_${suffix}` }).click();
+  await page.getByRole('textbox', { name: 'Description', exact: true }).fill('Unsaved.');
+  page.once('dialog', dialog => void dialog.dismiss());
+  await picker.selectOption(other.id);
+  await expect(picker).toHaveValue(home);
+  await expect(page.getByRole('textbox', { name: 'Description', exact: true })).toHaveValue('Unsaved.');
+  page.once('dialog', dialog => void dialog.accept());
+  await picker.selectOption(other.id);
+  await expect(page.getByRole('heading', { name: 'Your server, at a glance.' })).toBeVisible();
+  await page.request.delete(`${api}/tools/${tool.id}`, { headers: { ...headers, 'If-Match': String(tool.revision) } });
+});
+
+test('origin policies accept a pasted URL, report errors in the dialog and keep the layout readable', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Policies', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'API access policies' });
+  const host = `https://api-${suffix}.example.org`;
+  await dialog.getByLabel('API origin').fill(`${host}/mcp`);
+  await dialog.getByRole('button', { name: 'Approve origin' }).click();
+  await expect(dialog.getByRole('status')).toContainText(`Approved ${host}`);
+  await expect(dialog.locator('.policy-row').filter({ hasText: host })).toBeVisible();
+  await dialog.getByLabel('API origin').fill(`${host}/again`);
+  await dialog.getByRole('button', { name: 'Approve origin' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('already registered');
+  await expect(dialog).toBeVisible();
+  const button = await dialog.getByRole('button', { name: 'Approve origin' }).boundingBox();
+  const help = await dialog.locator('.policy-help').boundingBox();
+  expect(button!.y + button!.height).toBeLessThanOrEqual(help!.y);
+  const created = (await (await page.request.get('http://127.0.0.1:18000/api/policies/origins', { headers: { Authorization: `Bearer ${admin}` } })).json()).find((o: { origin: string }) => o.origin === host);
+  await page.request.delete(`http://127.0.0.1:18000/api/policies/origins/${created.id}`, { headers: { Authorization: `Bearer ${admin}`, 'If-Match': String(created.revision) } });
+});
+
+test('the empty-canvas welcome can be closed and stays closed for that server', async ({ page }) => {
+  const headers = { Authorization: `Bearer ${admin}` };
+  const empty = await (await page.request.post('http://127.0.0.1:18000/api/servers', { headers, data: { name: `Empty ${suffix}` } })).json();
+  await login(page);
+  await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption(empty.id);
+  const welcome = page.locator('.canvas-welcome');
+  await expect(welcome).toContainText('What will your server do?');
+  await welcome.getByRole('button', { name: 'Close' }).click();
+  await expect(welcome).toHaveCount(0);
+  await page.reload();
+  await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption(empty.id);
+  await expect(page.getByRole('heading', { name: 'Your server, at a glance.' })).toBeVisible();
+  await expect(welcome).toHaveCount(0);
+});
+
+test('tests show a running log, then the result, with tabs to switch between them', async ({ page }) => {
+  await login(page);
+  const demo = await openPack(page, 'demo');
+  await demo.getByRole('button', { name: /^READ echo/ }).click();
+  await page.getByRole('button', { name: 'Validate', exact: true }).click();
+  const tabs = page.locator('.output-tabs');
+  await expect(tabs.getByRole('tab', { name: 'Logs' })).toHaveAttribute('aria-selected', 'true');
+  await expect(tabs.getByRole('tab', { name: 'Result' })).toHaveCount(0);
+  const log = page.locator('.log-output');
+  await expect(log).toContainText('Definition is valid');
+  await page.getByRole('button', { name: 'Run test', exact: true }).click();
+  await expect(tabs.getByRole('tab', { name: 'Result' })).toHaveAttribute('aria-selected', 'true', { timeout: 30_000 });
+  await expect(page.locator('.result-output')).toContainText('"text": "example"');
+  await tabs.getByRole('tab', { name: 'Logs' }).click();
+  for (const step of ['Testing echo', 'Started the executor', 'Started agentgateway', 'Catalog ready on protocol 2026-07-28', 'Tool returned in', 'Test passed in']) await expect(log).toContainText(step);
+  await expect(log.locator('.log-line.success').last()).toContainText('Test passed in');
+  // Invalid JSON is caught before anything is sent, and errors are red.
+  await page.locator('#arguments').fill('{ not json');
+  await page.getByRole('button', { name: 'Run test', exact: true }).click();
+  await expect(log.locator('.log-line.error').last()).toContainText('not valid JSON');
+  await expect(log.locator('.log-line.error').last()).toHaveCSS('color', 'rgb(192, 57, 43)');
+  await page.getByRole('button', { name: 'Close playground' }).click();
+  const tool = (await workspace(page)).tools.find((t: { pack?: string; function?: string }) => t.pack === 'demo' && t.function === 'echo');
+  await page.request.delete(`http://127.0.0.1:18000/api/tools/${tool.id}`, { headers: { Authorization: `Bearer ${admin}`, 'If-Match': String(tool.revision) } });
 });

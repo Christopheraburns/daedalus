@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34 34" width="34" height="34">
+  <!-- The Builder's brand mark: teal tile with lucide GitBranch, matching .brand-mark in styles.css -->
+  <rect width="34" height="34" rx="9" fill="#087f8c"/>
+  <g transform="translate(6 6) scale(0.9166667)" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 6a9 9 0 0 0-9 9V3"/>
+    <circle cx="18" cy="6" r="3"/>
+    <circle cx="6" cy="18" r="3"/>
+  </g>
+</svg>

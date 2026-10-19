@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import os
 import secrets
 import signal
@@ -71,7 +72,11 @@ def rpc(url, token, method, params=None, version=MODERN):
             try:
                 message = json.loads(data)
             except ValueError as exc:
-                raise GatewayError(f"Gateway returned HTTP {response.status_code} without an MCP result") from exc
+                raise GatewayError(f"Gateway returned HTTP {response.status_code} without an MCP result: {bytes(data[:200]).decode(errors='replace')}") from exc
+            if isinstance(message, dict) and "result" not in message and "error" not in message:
+                # Not a JSON-RPC reply at all: a timeout or proxy page. Say what it was instead of "missing result".
+                timeout = " (the gateway's 10-second request limit or 8-second backend limit was reached)" if response.status_code in (502, 504) else ""
+                raise GatewayError(f"Gateway returned HTTP {response.status_code} instead of an MCP result{timeout}: {canonical(message)[:300]}")
             return rpc_result(message, version)
 
 
@@ -281,6 +286,7 @@ def wait_catalog(url, token, process, expected, timeout=15):
     """Wait for the gateway to serve exactly the expected tool names; None accepts whatever it serves (discovery)."""
     deadline = time.monotonic() + timeout
     last_error = "Gateway not ready"
+    delay = 0.2
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise GatewayError("Gateway process exited before verification")
@@ -289,14 +295,44 @@ def wait_catalog(url, token, process, expected, timeout=15):
             if expected is None or [t["name"] for t in tools] == sorted(expected):
                 return tools
             last_error = "Gateway catalog has not converged"
+        except GatewayError as exc:
+            # A JSON-RPC error or an upstream HTTP error is an answer, not a not-ready gateway: retrying only
+            # repeats it against upstream servers (and can trip their rate limits).
+            if re.match(r"MCP error -32(600|601|602)|Gateway returned HTTP 4\d\d instead", str(exc)):
+                raise
+            last_error = str(exc)
         except (httpx.HTTPError, ValueError) as exc:
             last_error = str(exc)
-        time.sleep(0.2)
+        time.sleep(delay)
+        delay = min(delay * 2, 1.6)
     raise GatewayError(last_error)
 
 
+def gateway_log_tail(path, limit=8):
+    """The last warning/error lines from a candidate's gateway and executor log, for test logs.
+    Timestamps, client ports and durations are dropped so repeats collapse into one line with a count."""
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    flagged = []
+    for line in lines:
+        if not any(word in line.lower() for word in ("error", "warn", "traceback", "exception", "failed")):
+            continue
+        text = re.sub(r"^\S+Z\s+", "", line.strip())
+        text = re.sub(r"\s(src\.addr|duration|gateway|listener|route|http\.host|http\.version)=\S+", "", text)
+        if flagged and flagged[-1][0] == text:
+            flagged[-1][1] += 1
+        else:
+            flagged.append([text, 1])
+    return [(text if count == 1 else f"{text} (x{count})")[:400] for text, count in flagged[-limit:]]
+
+
 @contextmanager
-def candidate(bundle, settings, discover=False):
+def candidate(bundle, settings, discover=False, events=None):
+    """An isolated gateway (and executor) for one bundle. `events(code, level="info", **values)`
+    receives each step so the Builder can show a test log; codes are translated by the UI."""
+    events = events or (lambda *args, **kwargs: None)
     with tempfile.TemporaryDirectory(prefix="factory-candidate-") as directory:
         port, admin = available_port(), available_port()
         while admin == port:
@@ -307,27 +343,44 @@ def candidate(bundle, settings, discover=False):
             executor = None
             try:
                 # The gateway fails closed if a target is unreachable at startup, so the executor comes first.
-                executor = start_executor(bundle, directory, log=log) if bundle.get("python_tools") else None
+                if bundle.get("python_tools"):
+                    executor = start_executor(bundle, directory, log=log)
+                    events("executor_started", port=executor.port, tools=len(bundle["python_tools"]))
                 secret_files = materialize_secrets(bundle, Path(directory) / "secrets")
+                if secret_files:
+                    events("secrets_written", count=len(secret_files))
                 config = gateway_config(bundle, "candidate", settings, port, admin, "127.0.0.1", token, executor, secret_files, forwarding=settings.jwt() is not None)
                 validate_config(config, settings, path)
+                events("config_validated", targets=len(config["mcp"]["targets"]))
                 process = subprocess.Popen([settings.gateway_binary, "-f", str(path)], stdout=log, stderr=log, start_new_session=True)
+                events("gateway_started", port=port)
             except BaseException:
+                log.flush()
+                for line in gateway_log_tail(Path(directory) / "gateway.log"):
+                    events("process_log", level="error", line=line)
                 if executor:
                     stop_process(executor.process)
                 raise
             try:
                 url = f"http://127.0.0.1:{port}/mcp"
                 tools = wait_catalog(url, token, process, None if discover else expected_names(bundle))
+                events("catalog_ready", version=MODERN, tools=", ".join(t["name"] for t in tools) or "-")
                 # Both protocol branches are exercised before accepting a release.
                 legacy = catalog(url, token, LEGACY)
                 if [(t["name"], t.get("inputSchema")) for t in legacy] != [(t["name"], t.get("inputSchema")) for t in tools]:
                     raise GatewayError("Protocol profiles expose different catalogs")
+                events("legacy_checked", version=LEGACY)
                 yield url, token, tools
+            except BaseException:
+                log.flush()
+                for line in gateway_log_tail(Path(directory) / "gateway.log"):
+                    events("process_log", level="error", line=line)
+                raise
             finally:
                 stop_process(process)
                 if executor:
                     stop_process(executor.process)
+                events("candidate_stopped")
 
 
 def verify_effective(bundle, release_id, settings, process, expected_catalog, executor=None):

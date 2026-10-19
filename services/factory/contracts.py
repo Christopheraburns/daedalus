@@ -61,7 +61,7 @@ class ToolSpec(Contract):
     description: str = Field(default="", max_length=2000)
     # http: one declarative API operation served by agentgateway. python: a pack
     # function served by the executor; a connection is optional for it.
-    kind: Literal["http", "python"] = "http"
+    kind: Literal["http", "python", "mcp"] = "http"
     connection_id: str | None = None
     method: Literal["GET", "POST"] = "GET"
     path: str = Field(default="/", max_length=300)
@@ -70,6 +70,11 @@ class ToolSpec(Contract):
     pack: str = Field(default="", max_length=40)
     function: str = Field(default="", max_length=64)
     config: dict = Field(default_factory=dict)
+    # mcp: one tool of an upstream MCP server (connection protocol mcp). The input schema is
+    # copied from the connection's discovery when the tool is saved, so releases are reproducible.
+    upstream_tool: str = Field(default="", max_length=128)
+    input_schema: dict = Field(default_factory=dict)
+    wrap_body: bool = False  # the upstream expects the arguments nested under "body" (agentgateway style)
     effect: Literal["read", "write"] = "read"
     enabled: bool = True
 
@@ -79,6 +84,8 @@ class ToolSpec(Contract):
             raise ValueError("HTTP tools require a connection")
         if self.kind == "python" and not (self.pack and self.function):
             raise ValueError("Python tools require a pack and a function")
+        if self.kind == "mcp" and not (self.connection_id and self.upstream_tool):
+            raise ValueError("MCP tools require an MCP connection and the upstream tool name")
         if len(str(self.config)) > 4000:
             raise ValueError("Tool configuration exceeds 4000 characters")
         return self

@@ -71,10 +71,23 @@ def validate_python_tool(spec, connection, allowed):
         raise ValueError("Add a description explaining when the tool should be used")
 
 
+def validate_mcp_tool(spec, connection, allowed):
+    validate_connection(connection, allowed)
+    if connection.get("protocol") != "mcp":
+        raise ValueError(f"MCP tools need an mcp connection; {connection['name']} is {connection.get('protocol', 'rest')}")
+    schema = spec.get("input_schema") or {}
+    if schema.get("type", "object") != "object" or len(canonical(schema)) > 20000:
+        raise ValueError("The upstream tool's input schema must be an object schema under 20000 characters")
+    if not spec["description"].strip():
+        raise ValueError("Add a description explaining when the tool should be used")
+
+
 def validate_tool(spec, connection, allowed):
     ToolSpec.model_validate(spec)
     if spec.get("kind") == "python":
         return validate_python_tool(spec, connection, allowed)
+    if spec.get("kind") == "mcp":
+        return validate_mcp_tool(spec, connection, allowed)
     validate_connection(connection, allowed)
     if connection.get("protocol", "rest") != "rest":
         raise ValueError(f"REST tools need a rest connection; {connection['name']} is {connection['protocol']}")
@@ -109,7 +122,7 @@ def executor_schema(python_tools):
     paths = {}
     for tool in python_tools:
         operation = {"operationId": tool["name"], "description": tool["description"], "responses": {"200": {"description": "JSON result"}}}
-        if tool["input_schema"]["properties"]:
+        if tool["input_schema"].get("properties"):
             operation["requestBody"] = {"required": True, "content": {"application/json": {"schema": tool["input_schema"]}}}
         paths[f"/tools/{tool['name']}"] = {"post": operation}
     return {"openapi": "3.0.3", "info": {"title": "Daedalus executor", "version": "1"}, "servers": [{"url": "/"}], "paths": paths}
@@ -137,6 +150,15 @@ def compile_bundle(tools, connections, allowed):
         python_tools.append({"name": spec["name"], "description": spec["description"], "pack": spec["pack"], "function": spec["function"],
             "connection_id": spec.get("connection_id"), "config": spec.get("config", {}), "effect": spec["effect"],
             "input_schema": packs.input_schema(packs.tool_info(spec["pack"], spec["function"])["parameters"])})
+    for tool in (t for t in enabled if t["spec"].get("kind") == "mcp"):
+        spec = tool["spec"]
+        validate_tool(spec, connections[spec["connection_id"]], allowed)
+        if spec["name"] in names:
+            raise ValueError("Tool names must be unique across the server")
+        names.add(spec["name"])
+        schema = {"type": "object", "properties": {}, **spec["input_schema"]}
+        python_tools.append({"name": spec["name"], "description": spec["description"], "kind": "mcp", "upstream_tool": spec["upstream_tool"], "wrap_body": spec.get("wrap_body", False),
+            "connection_id": spec["connection_id"], "effect": spec["effect"], "input_schema": schema})
     http_tools = [t for t in enabled if t["spec"].get("kind", "http") == "http"]
     for connection_id in sorted({t["spec"]["connection_id"] for t in http_tools}):
         connection = connections[connection_id]
@@ -169,6 +191,6 @@ def compile_bundle(tools, connections, allowed):
             names.add(name)
     used = sorted({t["spec"]["connection_id"] for t in enabled if t["spec"].get("connection_id")} | {e["connection_id"] for e in federated})
     # Project pack code is snapshotted so a published server never changes when the file is edited later.
-    pack_sources = {name: packs.project_path(name).read_text() for name in sorted({t["pack"] for t in python_tools}) if name not in packs.builtin_names()}
+    pack_sources = {name: packs.project_path(name).read_text() for name in sorted({t["pack"] for t in python_tools if t.get("kind", "python") == "python"}) if name not in packs.builtin_names()}
     stored = {k: {kk: vv for kk, vv in connections[k].items() if not kk.startswith("_")} for k in used}
     return {"schema_version": "factory/v1", "tools": enabled, "connections": stored, "targets": targets, "python_tools": python_tools, "pack_sources": pack_sources, "federated": federated}

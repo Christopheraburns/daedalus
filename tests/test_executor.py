@@ -208,3 +208,26 @@ def test_project_packs_are_authored_snapshotted_and_served(registry, monkeypatch
     assert client.delete(f"/api/tools/{tool['id']}", headers={"If-Match": "1"}).status_code == 204
     assert client.delete("/api/packs/custom").status_code == 204
     assert [p["name"] for p in client.get("/api/packs").json()] == ["demo", "hdfs", "rest", "s3"]
+
+
+@gateway
+def test_tool_tests_return_an_event_log_and_fail_on_tool_errors(registry, monkeypatch):
+    client, _, _ = registry
+    echo = client.post("/api/tools", json={"name": "echo", "description": "Echo text.", "kind": "python", "pack": "demo", "function": "echo"}).json()
+    outcome = client.post(f"/api/tools/{echo['id']}/test", headers={"If-Match": "1"}, json={"arguments": {"body": {"text": "logged"}}}).json()
+    codes = [e["code"] for e in outcome["log"]]
+    assert outcome["success"] and codes == ["bundle_compiled", "executor_started", "config_validated", "gateway_started", "catalog_ready", "legacy_checked", "arguments_validated", "calling_tool", "tool_returned", "candidate_stopped"]
+    assert [e["t"] for e in outcome["log"]] == sorted(e["t"] for e in outcome["log"])
+    assert outcome["log"][0]["values"] == {"name": "echo", "kind": "python", "connection": "-"}
+    # A tool that answers with an error fails the test and does not become tested.
+    connection = client.post("/api/connections", json={"name": "Mock", "base_url": "http://mock-api:8080"}).json()
+    fetch = client.post("/api/tools", json={"name": "fetch", "description": "Fetch.", "kind": "python", "pack": "demo", "function": "fetch_json", "connection_id": connection["id"]}).json()
+    failed = client.post(f"/api/tools/{fetch['id']}/test", headers={"If-Match": "1"}, json={"arguments": {"body": {"path": "../etc"}}}).json()
+    assert not failed["success"] and failed["log"][-2]["code"] == "tool_reported_error" and failed["log"][-2]["level"] == "error"
+    assert not next(t for t in client.get("/api/workspace").json()["tools"] if t["id"] == fetch["id"])["tested"]
+    # Failures before the call are logged too, with the reason.
+    monkeypatch.setenv("FACTORY_SECRET_UNSET_X", "")
+    secured = client.post("/api/connections", json={"name": "Secured", "base_url": "http://mock-api:8080", "auth_mode": "static", "secret_ref": "FACTORY_SECRET_UNSET_X"}).json()
+    rest = client.post("/api/tools", json={"name": "rest", "description": "REST.", "connection_id": secured["id"], "method": "GET", "path": "/fixture/echo"}).json()
+    broken = client.post(f"/api/tools/{rest['id']}/test", headers={"If-Match": "1"}, json={"arguments": {}}).json()
+    assert broken["log"][-1]["code"] == "test_failed" and "FACTORY_SECRET_UNSET_X" in broken["log"][-1]["values"]["message"]

@@ -32,8 +32,7 @@ def test_credentials_by_mode():
     with pytest.raises(ValueError, match="FACTORY_SECRET_X is not set"):
         auth.credentials({"auth_mode": "static", "secret_ref": "FACTORY_SECRET_X"}, user, {})
     assert auth.credentials({"auth_mode": "forward-token"}, user) == ({"Authorization": "Bearer caller-token"}, {})
-    with pytest.raises(ValueError, match="carried none"):
-        auth.credentials({"auth_mode": "forward-token"}, Caller("alice"))
+    assert auth.credentials({"auth_mode": "forward-token"}, Caller("alice")) == ({}, {})  # tests and probes carry no caller token
     with pytest.raises(ValueError, match="Kerberos"):
         auth.credentials({"auth_mode": "proxy-doas", "proxy_principal": "svc@EXAMPLE", "keytab_ref": "FACTORY_SECRET_KT", "doas_parameter": "doAs"}, user)
     for bad in ({"auth_mode": "static"}, {"auth_mode": "static", "secret_ref": "PASSWORD"}, {"auth_mode": "proxy-doas"}, {"auth_mode": "proxy-doas", "proxy_principal": "svc", "keytab_ref": "FACTORY_SECRET_KT", "doas_parameter": "do as"}):
@@ -58,7 +57,7 @@ def run_tool(client, item, arguments):
     response = client.post(f"/api/tools/{item['id']}/test", headers={"If-Match": str(item["revision"])}, json={"arguments": arguments})
     assert response.status_code == 200, response.text
     outcome = response.json()
-    assert outcome["success"] or "error" in outcome, outcome
+    assert outcome["success"] or "error" in outcome or "result" in outcome, outcome
     return outcome
 
 
@@ -91,7 +90,7 @@ def test_static_and_forwarded_credentials_reach_the_backend(registry, monkeypatc
     # forward-token without caller identity on this server: Python tools report it, HTTP tools cannot be configured.
     forward = connection(client, name="Forward", auth_mode="forward-token")
     whoami_fetch = tool(client, "fetch_forward", forward["id"], kind="python", pack="demo", function="fetch_json")
-    assert "carried none" in unwrap(result_of(client, whoami_fetch, {"body": {"path": "/fixture/echo"}}))["error"]
+    assert unwrap(result_of(client, whoami_fetch, {"body": {"path": "/fixture/echo"}}))["items"]["authorization"] is None  # no caller in a Builder test
     rest_forward = tool(client, "echo_forward", forward["id"], method="GET", path="/fixture/echo")
     outcome = run_tool(client, rest_forward, {})
     assert not outcome["success"] and "FACTORY_JWT_ISSUER" in outcome["error"]
