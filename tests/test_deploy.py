@@ -51,6 +51,8 @@ class FakeWorkbench:
                 return httpx.Response(400, json={"error": "json: cannot unmarshal object into Go value of type string", "code": 3})
             application.update({**body, "environment": json.loads(body["environment"]) if body.get("environment") else application["environment"]})
             return httpx.Response(200, json=application)
+        if request.method == "POST" and tail.endswith((":restart", ":stop")) and not request.content:
+            return httpx.Response(404, json={"error": "Not Found", "code": 5})  # what the real API answered without a body
         if request.method == "POST" and tail.endswith(":restart"):
             application["status"] = "APPLICATION_RUNNING"
             return httpx.Response(200, json={})
@@ -188,3 +190,9 @@ def test_the_server_script_is_a_path_from_the_project_root(monkeypatch):
     assert deployment.server_script(Settings()) == "mcp_server_app.py"
     monkeypatch.setenv("FACTORY_CAI_SCRIPT", "custom/start.py")
     assert deployment.server_script(Settings()) == "custom/start.py"
+
+
+def test_builder_health_reports_the_code_revision(registry):
+    client, _, _ = registry
+    body = client.get("/healthz").json()
+    assert body["status"] == "ok" and body["revision"] and body["revision"] != ""

@@ -110,7 +110,8 @@ class ClouderaAI:
             # (verified against Workbench: an object is rejected with "cannot unmarshal object into ... string").
             update = {**self.body(document), "environment": json.dumps(document["environment"])}
             application = self.request("PATCH", f"/{existing['id']}", json=update)
-            self.request("POST", f"/{existing['id']}:restart")
+            # Workbench answers 404 to :restart and :stop without a JSON body (verified); send an empty one.
+            self.request("POST", f"/{existing['id']}:restart", json={})
             return application or existing
         return self.request("POST", json=self.body(document))
 
@@ -118,7 +119,7 @@ class ClouderaAI:
         return self.request("GET", f"/{application_id}")
 
     def stop(self, application_id):
-        self.request("POST", f"/{application_id}:stop")
+        self.request("POST", f"/{application_id}:stop", json={})
 
     def delete(self, application_id):
         self.request("DELETE", f"/{application_id}")

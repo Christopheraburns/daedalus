@@ -165,6 +165,13 @@ The Builder has a **Deploy** panel with three providers (`FACTORY_DEPLOYMENT_PRO
   `FACTORY_CLOUDERA_API_BASE_URL/v1/daedalus/applications`, a customer-supplied
   bridge.
 
+**Updating Daedalus in Workbench:** `git pull`; run
+`PYTHONPATH=services /opt/mcp-factory/venv/bin/python -m factory.migrate` if new
+migrations arrived; `npm run build` in `apps/builder-ui` if the UI changed; then
+restart the Builder and Server applications (stop and start if a restart does not
+take). The Builder's `/healthz` reports the code revision its process loaded, so you
+can confirm the restart picked up the pull.
+
 Both launchers relay the Builder's or controller's output into the application log and keep a copy in project storage (`~/.daedalus/logs/builder.log` and `~/.daedalus/logs/server-<first 8 characters of FACTORY_SERVER_ID>.log`, with the previous run kept as `*.previous.log`; override the folder with `FACTORY_LOG_DIR`). When the child exits with an error, the launcher's error message ends with its last 40 lines.
 
 The launchers require Workbench's `CDSW_APP_PORT`. They default to loopback

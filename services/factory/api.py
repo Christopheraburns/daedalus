@@ -22,7 +22,7 @@ from .packs import Caller
 from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, ServerImport, LayoutSpec, PackSource, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
 from .db import ApiOrigin, Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
 from .gateway import candidate, rpc
-from .settings import MODERN, SERVER_ID, Settings
+from .settings import MODERN, ROOT, SERVER_ID, Settings
 
 
 def create_app(settings=None):
@@ -166,9 +166,19 @@ def create_app(settings=None):
                 message = message.replace(token, "[REDACTED]")
         return message
 
+    # The code revision this process loaded, so "is the Builder running the code I pulled?" has an answer.
+    revision_file = ROOT / ".git" / "HEAD"
+    code_revision = "unknown"
+    try:
+        head = revision_file.read_text().strip()
+        ref = ROOT / ".git" / head[5:] if head.startswith("ref: ") else None
+        code_revision = (ref.read_text().strip() if ref and ref.is_file() else head)[:12]
+    except OSError:
+        pass
+
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "application": "builder"}
+        return {"status": "ok", "application": "builder", "revision": code_revision}
 
     @app.get("/readyz")
     def ready():
