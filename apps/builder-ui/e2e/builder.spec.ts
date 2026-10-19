@@ -608,3 +608,24 @@ test('tests show a running log, then the result, with tabs to switch between the
   const tool = (await workspace(page)).tools.find((t: { pack?: string; function?: string }) => t.pack === 'demo' && t.function === 'echo');
   await page.request.delete(`http://127.0.0.1:18000/api/tools/${tool.id}`, { headers: { Authorization: `Bearer ${admin}`, 'If-Match': String(tool.revision) } });
 });
+
+test('manual deployment explains itself and shows what to create in Workbench', async ({ page }) => {
+  const headers = { Authorization: `Bearer ${admin}` };
+  const empty = await (await page.request.post('http://127.0.0.1:18000/api/servers', { headers, data: { name: `Deploy ${suffix}` } })).json();
+  await login(page);
+  await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption(empty.id);
+  await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Deployment & monitoring' });
+  await expect(dialog.getByRole('button', { name: 'Deploy release' })).toBeDisabled();
+  await expect(dialog).toContainText('Publish a release first');
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  // The default workspace has an active release from earlier tests.
+  await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption('85d30f87-b285-4d17-a89e-84bac6ac37bc');
+  await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Deploy release' }).click();
+  await expect(dialog).toContainText('Manual mode: no application was created');
+  await expect(dialog).toContainText('ready to deploy');
+  await expect(dialog).toContainText('CREATE THE SERVER APPLICATION BY HAND');
+  await expect(dialog.locator('.manifest-env')).toContainText('FACTORY_SERVER_ID=');
+  await expect(dialog).toContainText('mcp_server_app.py');
+});

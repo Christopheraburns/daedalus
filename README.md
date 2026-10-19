@@ -163,6 +163,8 @@ The Builder has a **Deploy** panel with three providers (`FACTORY_DEPLOYMENT_PRO
   `FACTORY_CLOUDERA_API_BASE_URL/v1/daedalus/applications`, a customer-supplied
   bridge.
 
+Both launchers relay the Builder's or controller's output into the application log and keep a copy in project storage (`~/.daedalus/logs/builder.log` and `~/.daedalus/logs/server-<first 8 characters of FACTORY_SERVER_ID>.log`, with the previous run kept as `*.previous.log`; override the folder with `FACTORY_LOG_DIR`). When the child exits with an error, the launcher's error message ends with its last 40 lines.
+
 The launchers require Workbench's `CDSW_APP_PORT`. They default to loopback
 binding; verify the deployment's ingress requirements before overriding
 `FACTORY_BUILDER_BIND` or `FACTORY_GATEWAY_BIND`. Gateway admin remains loopback

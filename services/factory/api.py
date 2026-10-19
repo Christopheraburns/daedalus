@@ -727,6 +727,7 @@ def create_app(settings=None):
             deployment.status = result["status"]; deployment.application_name = result.get("application_name")
             deployment.application_id = result.get("application_id"); deployment.endpoint = result.get("endpoint")
             deployment.provider = result.get("provider", settings.deployment_provider); deployment.message = result.get("message")
+            if "metrics" in result: deployment.metrics = result["metrics"]
             if result["status"] == "running": deployment.deployed_release_id = release.id
             deployment.revision += 1; audit(session, role, "deployment." + result["status"], deployment.id, release_id=release.id)
             return deployment_json(deployment)

@@ -36,6 +36,10 @@ def test_manual_deployment_requires_active_release_and_records_a_manifest_intent
     deployed = client.post("/api/deployments", json={"revision": workspace["server"]["revision"]})
     assert deployed.status_code == 200, deployed.text
     assert deployed.json()["status"] == "ready_to_deploy"
+    # Manual mode creates nothing, says so, and hands over what to enter in Workbench.
+    assert deployed.json()["message"].startswith("Manual mode: no application was created")
+    manifest = deployed.json()["metrics"]["manifest"]
+    assert manifest["entrypoint"] == "mcp_server_app.py" and manifest["environment"]["FACTORY_SERVER_ID"] and manifest["environment"]["FACTORY_DEPLOYED_RELEASE_ID"]
     assert deployed.json()["application_name"].startswith("my-mcp-server-")
     stopped = client.post("/api/deployments/stop", json={"revision": workspace["server"]["revision"]})
     assert stopped.status_code == 200 and stopped.json()["status"] == "stopped"

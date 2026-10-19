@@ -100,8 +100,9 @@ def describe(application, settings, name):
 def deploy_server(server_id, release_id, server_name, settings):
     document = manifest(server_id, release_id, server_name, settings)
     if settings.deployment_provider == "manual":
-        return {"status": "ready_to_deploy", "provider": "manual", "application_name": document["name"],
-            "message": "Deployment manifest is ready. Configure the Workbench deployment bridge to provision this application."}
+        # Nothing is created; the Builder shows these values so an operator can create the application by hand.
+        return {"status": "ready_to_deploy", "provider": "manual", "application_name": document["name"], "message": "Manual mode: no application was created. Create it with the values below, or set FACTORY_DEPLOYMENT_PROVIDER=cloudera-ai on the Builder application so Deploy creates it.",
+            "metrics": {"manifest": {key: document[key] for key in ("name", "subdomain", "entrypoint", "runtime_image", "environment")}}}
     if settings.deployment_provider == "cloudera-ai":
         return describe(ClouderaAI(settings).deploy(document), settings, document["name"])
     if settings.deployment_provider != "cloudera-bridge":
@@ -120,7 +121,7 @@ def deploy_server(server_id, release_id, server_name, settings):
 def deployment_action(action, deployment, settings):
     if settings.deployment_provider == "manual":
         statuses = {"stop": "stopped", "delete": "not_deployed", "refresh": deployment["status"]}
-        return {"status": statuses[action], "message": "Recorded locally; use the Workbench deployment bridge to apply this action.", "metrics": deployment.get("metrics", {})}
+        return {"status": statuses[action], "message": "Recorded locally; in manual mode, manage the application in Workbench yourself.", "metrics": deployment.get("metrics", {})}
     if settings.deployment_provider == "cloudera-ai":
         if not deployment.get("application_id"):
             raise ValueError("Deploy the server before managing its application")
