@@ -21,7 +21,7 @@ export type Deployment = { id: string; revision: number; status: string; desired
 export type ServerSummary = { id: string; name: string; revision: number; active_release_id: string | null; deployment: Deployment };
 export type Workspace = {
   identity: { role: string; mode: string };
-  server: { id: string; name: string; revision: number; active_release_id: string | null; desired_release_id: string | null; mcp_url: string; runtime: { online: boolean; ready?: boolean; gateway_pid?: number; gateway_started_at?: string; last_error?: string | null } };
+  server: { id: string; name: string; revision: number; active_release_id: string | null; desired_release_id: string | null; mcp_url: string; runtime: { online: boolean; ready?: boolean; gateway_pid?: number; gateway_started_at?: string; effective_release_id?: string | null; last_error?: string | null } };
   connections: Connection[]; tools: Tool[];
   layout: { revision: number; positions: Record<string, { x: number; y: number }> };
   active_tools: { id: string; revision: number; spec: ToolSpec; fingerprint: string }[];

@@ -47,6 +47,8 @@ class Settings:
     cai_runtime_identifier: str = field(default_factory=lambda: os.getenv("FACTORY_CAI_RUNTIME_IDENTIFIER", os.getenv("MCP_FACTORY_RUNTIME_IMAGE", "")))
     cai_cpu: float = field(default_factory=lambda: float(os.getenv("FACTORY_CAI_CPU", "1")))
     cai_memory: float = field(default_factory=lambda: float(os.getenv("FACTORY_CAI_MEMORY", "2")))
+    # Workbench runs application scripts relative to the project root; the repository may sit in a subfolder.
+    cai_script: str = field(default_factory=lambda: os.getenv("FACTORY_CAI_SCRIPT", ""))
     cai_bypass_auth: bool = field(default_factory=lambda: os.getenv("FACTORY_CAI_BYPASS_AUTH", "false").lower() == "true")
     # Caller identity: when an issuer is set, the public MCP port requires a JWT from it (Knox), the
     # verified subject becomes the caller for tools, and Daedalus's own probes use a loopback port.

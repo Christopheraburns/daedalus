@@ -629,3 +629,33 @@ test('manual deployment explains itself and shows what to create in Workbench', 
   await expect(dialog.locator('.manifest-env')).toContainText('FACTORY_SERVER_ID=');
   await expect(dialog).toContainText('mcp_server_app.py');
 });
+
+test('the deploy dialog follows a provisioning application until it runs', async ({ page }) => {
+  let state = 'provisioning';
+  let checks = 0;
+  const endpoint = 'https://my-mcp-server-85d30f87.ml-abc.example.cloudera.site/mcp';
+  await page.route('**/api/workspace*', async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.deployment = { ...body.deployment, provider: 'cloudera-ai', status: state, application_name: 'my-mcp-server-85d30f87', application_id: 'app-1', endpoint, message: `Workbench application APPLICATION_${state.toUpperCase()}` };
+    await route.fulfill({ response, json: body });
+  });
+  await page.route('**/api/deployments/live*', async route => {
+    checks += 1;
+    if (checks >= 2) state = 'running';
+    await route.fulfill({ json: { status: state } });
+  });
+  await login(page);
+  await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Deployment & monitoring' });
+  await expect(dialog).toContainText('provisioning');
+  await expect(dialog).toContainText('Checking Workbench every 5 seconds');
+  await expect(dialog.locator('.tool-status')).toHaveText('running', { timeout: 20_000 });
+  await expect(dialog).not.toContainText('Checking Workbench every 5 seconds');
+  // The endpoint label and URL are separated.
+  const row = dialog.locator('.detail-row').filter({ hasText: endpoint });
+  const label = await row.locator('span').first().boundingBox();
+  const url = await row.locator('code').boundingBox();
+  expect(url!.x - (label!.x + label!.width)).toBeGreaterThanOrEqual(12);
+  await expect(dialog).toContainText('Server health');
+});

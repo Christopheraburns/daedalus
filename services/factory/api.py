@@ -732,6 +732,27 @@ def create_app(settings=None):
             deployment.revision += 1; audit(session, role, "deployment." + result["status"], deployment.id, release_id=release.id)
             return deployment_json(deployment)
 
+    @app.get("/api/deployments/live")
+    def deployment_live(server_id: str | None = Query(default=None), role=Depends(identity)):
+        """Ask the provider for the application's current state while it starts or stops. Read-only for the
+        caller: no revision is needed, and only a change of status is recorded and audited."""
+        from .deployment import deployment_action as apply_action
+        server_id = selected(server_id)
+        with sessions.begin() as session:
+            deployment = session.scalar(select(Deployment).where(Deployment.server_id == server_id).with_for_update())
+            if deployment is None: raise HTTPException(404, "Record not found")
+            if deployment.provider == "manual" or not deployment.application_id:
+                return deployment_json(deployment)
+            try:
+                result = apply_action("refresh", deployment_json(deployment), settings)
+            except Exception as exc:
+                return {**deployment_json(deployment), "live_error": safe_error(exc)}
+            if result["status"] != deployment.status:
+                deployment.status = result["status"]; deployment.message = result.get("message"); deployment.metrics = result.get("metrics", deployment.metrics)
+                if result["status"] == "running": deployment.deployed_release_id = deployment.desired_release_id
+                deployment.revision += 1; audit(session, "deployment-monitor", "deployment.status", deployment.id, status=result["status"])
+            return deployment_json(deployment)
+
     @app.post("/api/deployments/{action}")
     def deployment_action(action: str, request: DeploymentAction, server_id: str | None = Query(default=None), role=Depends(require("publisher"))):
         if action not in {"stop", "delete", "refresh"}: raise HTTPException(404, "Unknown deployment action")
@@ -742,6 +763,7 @@ def create_app(settings=None):
             deployment = session.scalar(select(Deployment).where(Deployment.server_id == server_id).with_for_update())
             result = apply_action(action, deployment_json(deployment), settings)
             deployment.status = result["status"]; deployment.message = result.get("message"); deployment.metrics = result.get("metrics", deployment.metrics)
+            if result["status"] == "running": deployment.deployed_release_id = deployment.desired_release_id
             deployment.revision += 1; audit(session, role, "deployment." + action, deployment.id)
             return deployment_json(deployment)
 

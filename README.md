@@ -150,10 +150,12 @@ The Builder has a **Deploy** panel with three providers (`FACTORY_DEPLOYMENT_PRO
   Workbench API v2 from inside the project: Deploy creates the application (or
   updates and restarts it for a newer release), Refresh reads its live status,
   Stop and Delete act on it. Configuration defaults to what Workbench sets in a
-  session: `CDSW_DOMAIN`, `CDSW_APIV2_KEY`, `CDSW_PROJECT_ID`, plus
-  `MCP_FACTORY_RUNTIME_IMAGE` for the runtime identifier; override any of them with
+  session: `CDSW_DOMAIN`, `CDSW_APIV2_KEY`, `CDSW_PROJECT_ID`. The Server's runtime is
+  the Builder's own, looked up in the Runtime Catalog by its `ML_RUNTIME_*`
+  metadata (or `MCP_FACTORY_RUNTIME_IMAGE` locally); override any of them with
   `FACTORY_CAI_API_URL`, `FACTORY_CAI_API_KEY`, `FACTORY_CAI_PROJECT_ID`,
-  `FACTORY_CAI_RUNTIME_IDENTIFIER`, and size with `FACTORY_CAI_CPU` /
+  `FACTORY_CAI_RUNTIME_IDENTIFIER`, `FACTORY_CAI_SCRIPT` (the Server script as a path from the project
+  root; by default worked out from where the repository sits, e.g. `daedalus/mcp_server_app.py`), and size with `FACTORY_CAI_CPU` /
   `FACTORY_CAI_MEMORY`. Set `FACTORY_CAI_BYPASS_AUTH=true` when MCP clients
   authenticate with a Knox JWT instead of a Workbench login. The deployed
   application pins `FACTORY_DEPLOYED_RELEASE_ID`; deploy again to roll a newer

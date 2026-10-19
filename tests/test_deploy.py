@@ -20,6 +20,12 @@ class FakeWorkbench:
         self.calls.append((request.method, request.url.path, request.headers.get("authorization")))
         if request.headers.get("authorization") != "Bearer api-key-123":
             return httpx.Response(401, json={"message": "unauthorized"})
+        if request.url.path == "/api/v2/runtimes":
+            wanted = json.loads(request.url.params["search_filter"])["edition"]
+            catalog = [{"image_identifier": "registry/other:1", "edition": "Standard", "full_version": "2026.08.1"},
+                {"image_identifier": "registry/mcp-factory-runtime:0.1.1", "edition": "MCP Factory Development", "full_version": "0.1.1", "editor": "PBJ Workbench", "kernel": "Python 3.12"},
+                {"image_identifier": "registry/mcp-factory-runtime:0.1.2", "edition": "MCP Factory Development", "full_version": "0.1.2", "editor": "PBJ Workbench", "kernel": "Python 3.12"}]
+            return httpx.Response(200, json={"runtimes": [r for r in catalog if r["edition"] == wanted]})
         parts = request.url.path.split("/applications")
         assert parts[0] == "/api/v2/projects/proj-1"
         tail = parts[1]
@@ -133,3 +139,49 @@ def test_cloudera_ai_provider_reports_configuration_and_api_errors(registry, wor
     client = builder(registry)
     revision = client.get("/api/workspace").json()["server"]["revision"]
     assert "FACTORY_CAI_PROJECT_ID" in client.post("/api/deployments", json={"revision": revision}).json()["message"]
+
+
+def test_cloudera_ai_provider_uses_the_builders_own_runtime_from_the_catalog(registry, workbench, monkeypatch):
+    _, sessions, _ = registry
+    monkeypatch.delenv("MCP_FACTORY_RUNTIME_IMAGE")
+    for key, value in {"EDITION": "MCP Factory Development", "FULL_VERSION": "0.1.2", "EDITOR": "PBJ Workbench", "KERNEL": "Python 3.12"}.items():
+        monkeypatch.setenv(f"ML_RUNTIME_{key}", value)
+    client = builder(registry)
+    activate_release(sessions)
+    created = client.post("/api/deployments", json={"revision": client.get("/api/workspace").json()["server"]["revision"]}).json()
+    assert created["status"] == "provisioning", created["message"]
+    assert workbench.applications["app-1"]["runtime_identifier"] == "registry/mcp-factory-runtime:0.1.2"
+    # A runtime missing from the catalog is reported with what to do.
+    monkeypatch.setenv("ML_RUNTIME_FULL_VERSION", "9.9.9")
+    revision = client.get("/api/workspace").json()["server"]["revision"]
+    failed = client.post("/api/deployments", json={"revision": revision}).json()
+    assert failed["status"] == "failed" and "No runtime in the Runtime Catalog matches" in failed["message"]
+
+
+def test_live_status_follows_the_application_without_a_revision(registry, workbench):
+    _, sessions, _ = registry
+    client = builder(registry)
+    release = activate_release(sessions)
+    created = client.post("/api/deployments", json={"revision": client.get("/api/workspace").json()["server"]["revision"]}).json()
+    assert created["status"] == "provisioning" and created["deployed_release_id"] is None
+    viewer = {"Authorization": "Bearer " + __import__("os").environ["FACTORY_VIEWER_TOKEN"]}
+    assert client.get("/api/deployments/live", headers=viewer).json()["status"] == "provisioning"  # unchanged: nothing recorded
+    workbench.applications["app-1"]["status"] = "APPLICATION_RUNNING"
+    live = client.get("/api/deployments/live", headers=viewer).json()
+    assert live["status"] == "running" and live["deployed_release_id"] == release
+    client.get("/api/deployments/live")
+    from sqlalchemy import select
+    from factory.db import Audit
+    with sessions() as session:
+        changes = list(session.scalars(select(Audit).where(Audit.action == "deployment.status")))
+    assert len(changes) == 1 and changes[0].details["status"] == "running" and changes[0].actor == "deployment-monitor"
+
+
+def test_the_server_script_is_a_path_from_the_project_root(monkeypatch):
+    from factory.settings import Settings
+    monkeypatch.setenv("CDSW_HOME", "/")  # in the test container the repository is /workspace, so "workspace/" is its folder
+    assert deployment.server_script(Settings()) == "workspace/mcp_server_app.py"
+    monkeypatch.setenv("CDSW_HOME", "/workspace")
+    assert deployment.server_script(Settings()) == "mcp_server_app.py"
+    monkeypatch.setenv("FACTORY_CAI_SCRIPT", "custom/start.py")
+    assert deployment.server_script(Settings()) == "custom/start.py"

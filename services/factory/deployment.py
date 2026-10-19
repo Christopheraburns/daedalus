@@ -14,6 +14,7 @@ a fake and must be verified against the target Workbench release.
 import json
 import os
 import re
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 import httpx
@@ -33,13 +34,24 @@ def subdomain(name):
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", name.lower())).strip("-")[:63]
 
 
+def server_script(settings):
+    """mcp_server_app.py as a path from the project root (the Workbench home), wherever the repository sits."""
+    if settings.cai_script:
+        return settings.cai_script
+    script = (Path(__file__).resolve().parents[2] / "mcp_server_app.py")
+    try:
+        return script.relative_to(Path(os.getenv("CDSW_HOME", Path.home())).resolve()).as_posix()
+    except ValueError:
+        return "mcp_server_app.py"
+
+
 def manifest(server_id, release_id, server_name, settings):
     name = application_name(server_name, server_id)
     environment = {"FACTORY_SERVER_ID": server_id, "FACTORY_DEPLOYED_RELEASE_ID": release_id}
     if settings.cai_domain:
         environment["FACTORY_PUBLIC_MCP_URL"] = f"https://{subdomain(name)}.{settings.cai_domain}/mcp"
     return {"name": name, "kind": "daedalus-mcp-server", "server_id": server_id, "release_id": release_id, "subdomain": subdomain(name),
-        "runtime_image": settings.cai_runtime_identifier, "entrypoint": "mcp_server_app.py", "environment": environment}
+        "runtime_image": settings.cai_runtime_identifier, "entrypoint": server_script(settings), "environment": environment}
 
 
 class ClouderaAI:
@@ -47,7 +59,7 @@ class ClouderaAI:
 
     def __init__(self, settings):
         missing = [name for name, value in (("FACTORY_CAI_API_URL (or CDSW_DOMAIN)", settings.cai_api_url), ("FACTORY_CAI_API_KEY (or CDSW_APIV2_KEY)", settings.cai_api_key),
-            ("FACTORY_CAI_PROJECT_ID (or CDSW_PROJECT_ID)", settings.cai_project_id), ("FACTORY_CAI_RUNTIME_IDENTIFIER (or MCP_FACTORY_RUNTIME_IMAGE)", settings.cai_runtime_identifier)) if not value]
+            ("FACTORY_CAI_PROJECT_ID (or CDSW_PROJECT_ID)", settings.cai_project_id)) if not value]
         if missing:
             raise ValueError("Configure " + ", ".join(missing) + " for the cloudera-ai deployment provider")
         self.settings = settings
@@ -59,6 +71,24 @@ class ClouderaAI:
         if response.status_code >= 400:
             raise ValueError(f"Cloudera AI API returned {response.status_code} for {method} applications{path}: {response.text[:300]}")
         return response.json() if response.content else {}
+
+    def runtime_identifier(self):
+        """The runtime image for the Server application: configured explicitly, or the runtime this Builder
+        runs on, found in the Workbench runtime catalog by the ML_RUNTIME_* metadata every runtime carries."""
+        if self.settings.cai_runtime_identifier:
+            return self.settings.cai_runtime_identifier
+        own = {key: os.getenv(f"ML_RUNTIME_{key.upper()}", "") for key in ("edition", "full_version", "editor", "kernel")}
+        if not own["edition"]:
+            raise ValueError("Set FACTORY_CAI_RUNTIME_IDENTIFIER to the Server runtime's image (as listed in the Runtime Catalog); this runtime does not advertise ML_RUNTIME_EDITION")
+        url = self.settings.cai_api_url.rstrip("/") + "/api/v2/runtimes"
+        response = self.client.get(url, params={"search_filter": json.dumps({"edition": own["edition"]}), "page_size": 100})
+        if response.status_code >= 400:
+            raise ValueError(f"Cloudera AI API returned {response.status_code} for GET runtimes: {response.text[:300]}")
+        candidates = [r for r in response.json().get("runtimes", []) if r.get("edition") == own["edition"] and r.get("image_identifier")]
+        exact = [r for r in candidates if all(not own[k] or not r.get(k) or r.get(k) == own[k] for k in ("full_version", "editor", "kernel"))]
+        if not exact:
+            raise ValueError(f"No runtime in the Runtime Catalog matches this Builder's runtime ({own['edition']} {own['full_version']}); register it or set FACTORY_CAI_RUNTIME_IDENTIFIER")
+        return exact[0]["image_identifier"]
 
     def find(self, name):
         for application in self.request("GET").get("applications", []):
@@ -73,6 +103,7 @@ class ClouderaAI:
             "cpu": s.cai_cpu, "memory": s.cai_memory, "bypass_authentication": s.cai_bypass_auth}
 
     def deploy(self, document):
+        document = {**document, "runtime_image": self.runtime_identifier()}
         existing = self.find(document["name"])
         if existing:
             application = self.request("PATCH", f"/{existing['id']}", json=self.body(document))
