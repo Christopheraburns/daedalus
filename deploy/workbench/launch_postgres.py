@@ -45,7 +45,10 @@ if not (data / "PG_VERSION").is_file():
     with (data / "pg_hba.conf").open("a") as hba:
         hba.write("host all all 0.0.0.0/0 scram-sha-256\nhost all all ::/0 scram-sha-256\n")
 
-process = subprocess.Popen([bin_dir / "postgres", "-D", data, "-c", "listen_addresses=*", "-c", f"port={port}", "-c", "unix_socket_directories=/tmp"], start_new_session=True)
+# TCP keepalives let Postgres notice within about a minute when a client pod vanishes (a Workbench restart
+# can kill it without closing its connection), so its locks, including Server ownership, are released.
+process = subprocess.Popen([bin_dir / "postgres", "-D", data, "-c", "listen_addresses=*", "-c", f"port={port}", "-c", "unix_socket_directories=/tmp",
+    "-c", "tcp_keepalives_idle=30", "-c", "tcp_keepalives_interval=10", "-c", "tcp_keepalives_count=3"], start_new_session=True)
 try:
     # Fast shutdown: disconnect clients and checkpoint rather than wait for them.
     signal.signal(signal.SIGTERM, lambda *_: process.send_signal(signal.SIGINT))

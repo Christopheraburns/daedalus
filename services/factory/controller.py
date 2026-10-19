@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -52,11 +53,44 @@ def retire_assets(assets):
         shutil.rmtree(assets.directory, ignore_errors=True)
 
 
+LOCK = "SELECT pg_try_advisory_lock(hashtext(current_schema()), hashtext(:server_id))"
+HOLDER = """SELECT a.application_name, host(a.client_addr) AS address, a.backend_start, a.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+    WHERE l.locktype = 'advisory' AND l.granted AND l.classid = (hashtext(current_schema())::bigint & 4294967295)::oid
+    AND l.objid = (hashtext(:server_id)::bigint & 4294967295)::oid AND a.pid <> pg_backend_pid()"""
+
+
+def describe_holder(owner, server_id):
+    row = owner.execute(text(HOLDER), {"server_id": server_id}).mappings().first()
+    if row is None:
+        return "an unknown process"
+    name = row["application_name"] or "a process without a name (an older Daedalus version or another client)"
+    since = row["backend_start"].strftime("%Y-%m-%d %H:%M:%S %Z") if row["backend_start"] else "an unknown time"
+    return f"{name} (from {row['address'] or 'a local socket'}, database pid {row['pid']}, connected since {since})"
+
+
+def acquire_ownership(owner, server_id, wait, stopped):
+    """One Server process per logical server. Wait a while for a previous copy to let go: during a
+    Workbench restart the old pod can still hold the lock, or Postgres may not yet have noticed it is gone."""
+    deadline = time.monotonic() + wait
+    announced = 0.0
+    while not owner.scalar(text(LOCK), {"server_id": server_id}):
+        holder = describe_holder(owner, server_id)
+        owner.commit()
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Another Server process owns MCP server {server_id}: {holder}. Stop that application, or wait for it to exit, then start this one again")
+        if time.monotonic() - announced >= 10:
+            log.warning("MCP server %s is owned by %s; waiting up to %d more seconds for it to exit", server_id, holder, int(deadline - time.monotonic()))
+            announced = time.monotonic()
+        if stopped.wait(2):
+            raise RuntimeError("Stopped while waiting for ownership")
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings()
     server_id = settings.server_id
-    engine, sessions = database(settings.database_url)
+    identity = f"daedalus-server {server_id[:8]} on {socket.gethostname()}"
+    engine, sessions = database(settings.database_url, identity)
     stopped = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stopped.set())
@@ -67,8 +101,7 @@ def main():
     process = assets = None
     # Connection-scoped lock prevents two Server instances writing the same server.
     with engine.connect() as owner:
-        if not owner.scalar(text("SELECT pg_try_advisory_lock(hashtext(current_schema()), hashtext(:server_id))"), {"server_id": server_id}):
-            raise RuntimeError("Another Server process owns this logical MCP server")
+        acquire_ownership(owner, server_id, float(os.getenv("FACTORY_LOCK_WAIT", "120")), stopped)
         with sessions() as session:
             server = session.get(Server, server_id)
             if server is None:

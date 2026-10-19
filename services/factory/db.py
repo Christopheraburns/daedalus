@@ -107,8 +107,9 @@ class Deployment(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
-def database(url):
-    engine = create_engine(url, pool_pre_ping=True)
+def database(url, application_name=None):
+    # application_name shows in pg_stat_activity, so lock holders can be identified.
+    engine = create_engine(url, pool_pre_ping=True, connect_args={"application_name": application_name[:63]} if application_name else {})
     return engine, sessionmaker(engine, expire_on_commit=False)
 
 
