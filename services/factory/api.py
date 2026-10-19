@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jsonschema import Draft202012Validator
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from .compiler import compile_bundle, digest, fingerprint, validate_connection, validate_tool
 from . import auth, mcp_client, packs
@@ -183,12 +183,36 @@ def create_app(settings=None):
             raise HTTPException(503, "Registry is unavailable")
         return {"status": "ready"}
 
+    # Which process holds each server's single-owner lock (see controller.acquire_ownership), straight from Postgres.
+    OWNERS = text("""SELECT s.id, a.application_name, host(a.client_addr) AS address, a.backend_start FROM servers s
+        JOIN pg_locks l ON l.locktype = 'advisory' AND l.granted AND l.classid = (hashtext(current_schema())::bigint & 4294967295)::oid
+            AND l.objid = (hashtext(s.id)::bigint & 4294967295)::oid
+        JOIN pg_stat_activity a ON a.pid = l.pid""")
+
+    def contender(session, server_id):
+        """The latest Server copy that gave up because another one owns this server, within the last hour."""
+        event = session.scalar(select(Audit).where(Audit.target_id == server_id, Audit.action == "server.contended").order_by(Audit.created_at.desc()).limit(1))
+        if event is None or (datetime.now(timezone.utc) - event.created_at).total_seconds() > 3600:
+            return None
+        return {"host": event.details.get("host"), "revision": event.details.get("revision"), "owner": event.details.get("owner"), "at": event.created_at.isoformat()}
+
     @app.get("/api/servers")
     def servers(role=Depends(identity)):
         with sessions() as session:
-            return [{"id": s.id, "name": s.name, "revision": s.revision, "active_release_id": s.active_release_id,
-                "deployment": deployment_json(session.scalar(select(Deployment).where(Deployment.server_id == s.id)))}
-                for s in session.scalars(select(Server).order_by(Server.name))]
+            owners = {row.id: {"process": row.application_name or None, "address": row.address, "since": row.backend_start.isoformat() if row.backend_start else None}
+                for row in session.execute(OWNERS)}
+            counts = lambda model, server_id: session.scalar(select(func.count()).select_from(model).where(model.server_id == server_id))
+            listing = []
+            for s in session.scalars(select(Server).order_by(Server.name)):
+                runtime = dict(s.runtime or {})
+                heartbeat = runtime.get("heartbeat")
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds() if heartbeat else None
+                listing.append({"id": s.id, "name": s.name, "revision": s.revision, "active_release_id": s.active_release_id,
+                    "deployment": deployment_json(session.scalar(select(Deployment).where(Deployment.server_id == s.id))),
+                    "tools": counts(Tool, s.id), "connections": counts(Connection, s.id), "owner": owners.get(s.id), "contender": contender(session, s.id),
+                    "runtime": {"online": age is not None and age < 12, "ready": bool(runtime.get("ready")), "heartbeat_age": round(age) if age is not None else None,
+                        "host": runtime.get("host"), "revision": runtime.get("revision"), "effective_release_id": runtime.get("effective_release_id")}})
+            return listing
 
     @app.post("/api/openapi/preview")
     def openapi_preview(request: dict, role=Depends(identity)):

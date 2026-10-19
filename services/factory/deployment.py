@@ -94,11 +94,16 @@ class ClouderaAI:
             raise ValueError(f"No runtime in the Runtime Catalog matches this Builder's runtime ({own['edition']} {own['full_version']}); register it or set FACTORY_CAI_RUNTIME_IDENTIFIER")
         return exact[0]["image_identifier"]
 
+    def applications(self):
+        return self.request("GET").get("applications", [])
+
     def find(self, name):
-        for application in self.request("GET").get("applications", []):
-            if application.get("name") == name:
-                return application
-        return None
+        return next((a for a in self.applications() if a.get("name") == name), None)
+
+    def serving(self, server_id):
+        """The project's application already running a Server for this MCP server (FACTORY_SERVER_ID), if any,
+        whether Deploy made it or someone created it by hand."""
+        return next((a for a in self.applications() if environment_of(a).get("FACTORY_SERVER_ID") == server_id), None)
 
     def body(self, document):
         s = self.settings
@@ -115,17 +120,22 @@ class ClouderaAI:
         return response.json()
 
     def deploy(self, document, application_id=None):
+        """Create the Server application, or update the one that already serves this MCP server. Only one
+        Server may run per MCP server, so an application found by its FACTORY_SERVER_ID is adopted rather than
+        duplicated, keeping its name, subdomain and any variables someone added to it."""
         document = {**document, "runtime_image": self.runtime_identifier()}
-        # The stored ID is authoritative; the name is only a fallback for applications created before IDs were kept.
-        existing = (self.get_application(application_id) if application_id else None) or self.find(document["name"])
+        existing = (self.get_application(application_id) if application_id else None) or self.serving(document["server_id"]) or self.find(document["name"])
         if existing:
+            adopted = existing.get("id") != application_id and existing.get("name") != document["name"]
+            document = {**document, "name": existing.get("name") or document["name"], "subdomain": existing.get("subdomain") or document["subdomain"],
+                "environment": {**environment_of(existing), **document["environment"]}}
             # The update call takes the Application resource, whose environment is a JSON-encoded string
             # (verified against Workbench: an object is rejected with "cannot unmarshal object into ... string").
             update = {**self.body(document), "environment": json.dumps(document["environment"])}
-            application = self.request("PATCH", f"/{existing['id']}", json=update)
+            application = self.request("PATCH", f"/{existing['id']}", json=update) or existing
             # Workbench answers 404 to :restart and :stop without a JSON body (verified); send an empty one.
             self.request("POST", f"/{existing['id']}:restart", json={})
-            return application or existing
+            return {**application, "_adopted": adopted}
         return self.request("POST", json=self.body(document))
 
     def status(self, application_id):
@@ -138,11 +148,24 @@ class ClouderaAI:
         self.request("DELETE", f"/{application_id}")
 
 
+def environment_of(application):
+    """An application's environment variables; the API returns them as a JSON string (as an object on create)."""
+    value = application.get("environment") or {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = {}
+    return value if isinstance(value, dict) else {}
+
+
 def describe(application, settings, name):
     status = STATUS.get(application.get("status", ""), "provisioning")
+    name = application.get("name") or name
     endpoint = f"https://{application.get('subdomain') or subdomain(name)}.{settings.cai_domain}/mcp" if settings.cai_domain else None
+    message = f"Adopted {name}, which already served this server; Workbench application {application.get('status', 'updated')}" if application.get("_adopted") else f"Workbench application {application.get('status', 'created')}"
     return {"status": status, "provider": "cloudera-ai", "application_name": name, "application_id": application.get("id"), "endpoint": endpoint,
-        "message": f"Workbench application {application.get('status', 'created')}", "metrics": {"creator": (application.get("creator") or {}).get("username"), "updated_at": application.get("updated_at")}}
+        "message": message, "metrics": {"creator": (application.get("creator") or {}).get("username"), "updated_at": application.get("updated_at")}}
 
 
 def deploy_server(server_id, release_id, server_name, settings, application_name=None, application_id=None):

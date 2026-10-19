@@ -24,4 +24,7 @@ def test_a_second_server_process_waits_names_the_owner_and_then_gives_up(registr
         output = second.stdout + second.stderr
         assert "waiting up to" in output
         assert "Another Server process owns MCP server" in output and "daedalus-server 85d30f87 on first-pod" in output and "connected since" in output
+        listing = {s["id"]: s for s in registry[0].get("/api/servers").json()}
+        contender = listing[settings.server_id]["contender"]
+        assert contender and contender["host"] and "first-pod" in contender["owner"]  # the second copy is recorded
     owner_engine.dispose()

@@ -18,7 +18,10 @@ export type Connection = { id: string; revision: number; name: string; base_url:
 export type ApiOrigin = { id: string; server_id: string; revision: number; origin: string; description: string; enabled: boolean; bootstrap?: boolean; created_at?: string };
 export type Release = { id: string; status: string; checksum: string; error: string | null; created_at: string; created_by: string; tool_names: string[] };
 export type Deployment = { id: string; revision: number; status: string; desired_release_id: string | null; deployed_release_id: string | null; application_name: string | null; application_id: string | null; endpoint: string | null; provider: string; message: string | null; metrics: Record<string, unknown>; updated_at: string };
-export type ServerSummary = { id: string; name: string; revision: number; active_release_id: string | null; deployment: Deployment };
+export type ServerSummary = { id: string; name: string; revision: number; active_release_id: string | null; deployment: Deployment; tools?: number; connections?: number;
+  owner?: { process: string | null; address: string | null; since: string | null } | null;
+  contender?: { host: string | null; revision: string | null; owner: string | null; at: string } | null;
+  runtime?: { online: boolean; ready: boolean; heartbeat_age: number | null; host: string | null; revision: string | null; effective_release_id: string | null } };
 export type Workspace = {
   identity: { role: string; mode: string };
   server: { id: string; name: string; revision: number; active_release_id: string | null; desired_release_id: string | null; mcp_url: string; runtime: { online: boolean; ready?: boolean; gateway_pid?: number; gateway_started_at?: string; effective_release_id?: string | null; last_error?: string | null; revision?: string; host?: string } };

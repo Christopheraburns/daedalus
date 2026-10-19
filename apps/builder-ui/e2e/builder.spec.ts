@@ -712,3 +712,21 @@ test('an API older than the page is explained instead of showing a raw error', a
   await page.waitForTimeout(6000);
   expect(calls).toBe(1); // it stops asking
 });
+
+test('the servers area lists every server by name with its state', async ({ page }) => {
+  const headers = { Authorization: `Bearer ${admin}` };
+  const other = await (await page.request.post('http://127.0.0.1:18000/api/servers', { headers, data: { name: `Listed server ${suffix}` } })).json();
+  await login(page);
+  await page.getByRole('button', { name: 'All servers' }).click();
+  const dialog = page.getByRole('dialog', { name: 'MCP servers in this project' });
+  const mine = dialog.locator('.server-card').filter({ hasText: 'My MCP server' });
+  await expect(mine).toContainText('open now');
+  await expect(mine).toContainText('Online on pod'); // the checks stack runs a Server for the default workspace
+  await expect(mine).toContainText('Owned by');
+  const card = dialog.locator('.server-card').filter({ hasText: `Listed server ${suffix}` });
+  await expect(card).toContainText(`ID ${other.id.slice(0, 8)}`);
+  await expect(card).toContainText('No Server has run yet');
+  await card.getByRole('button', { name: 'Open' }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'MCP server workspace' }).locator('option:checked')).toHaveText(`Listed server ${suffix}`);
+});

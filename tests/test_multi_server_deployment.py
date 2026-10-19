@@ -43,3 +43,24 @@ def test_manual_deployment_requires_active_release_and_records_a_manifest_intent
     assert deployed.json()["application_name"].startswith("my-mcp-server-")
     stopped = client.post("/api/deployments/stop", json={"revision": workspace["server"]["revision"]})
     assert stopped.status_code == 200 and stopped.json()["status"] == "stopped"
+
+
+def test_the_server_listing_names_servers_and_shows_who_serves_them(registry):
+    import os
+    from sqlalchemy import text
+    from factory.db import database
+    client, _, settings = registry
+    other = client.post("/api/servers", json={"name": "Customer support MCP"}).json()
+    client.post("/api/tools", json={"name": "echo", "description": "Echo.", "kind": "python", "pack": "demo", "function": "echo"})
+    listing = {s["name"]: s for s in client.get("/api/servers").json()}
+    assert set(listing) == {"My MCP server", "Customer support MCP"}
+    assert listing["My MCP server"]["tools"] == 1 and listing["Customer support MCP"]["tools"] == 0
+    assert listing["My MCP server"]["owner"] is None and listing["My MCP server"]["runtime"]["online"] is False
+    engine, _ = database(os.environ["DATABASE_URL"], "daedalus-server 85d30f87 on pod-a")
+    with engine.connect() as owner:
+        owner.scalar(text("SELECT pg_try_advisory_lock(hashtext(current_schema()), hashtext(:s))"), {"s": settings.server_id})
+        held = {s["name"]: s for s in client.get("/api/servers").json()}
+        assert held["My MCP server"]["owner"]["process"] == "daedalus-server 85d30f87 on pod-a" and held["My MCP server"]["owner"]["since"]
+        assert held["Customer support MCP"]["owner"] is None
+    engine.dispose()
+    assert other["id"] in {s["id"] for s in listing.values()}

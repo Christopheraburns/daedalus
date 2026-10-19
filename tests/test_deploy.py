@@ -35,7 +35,7 @@ class FakeWorkbench:
             body = json.loads(request.content)
             assert body["subdomain"] == body["name"] and body["script"] == "mcp_server_app.py" and body["runtime_identifier"] == "registry/mcp-factory-runtime:0.1.2"
             assert body["environment"]["FACTORY_SERVER_ID"] == SERVER_ID and body["cpu"] == 1 and body["memory"] == 2 and body["bypass_authentication"] is True
-            application = {"id": f"app-{self.next_id}", "status": "APPLICATION_STARTING", "creator": {"username": "cburns"}, "updated_at": "2026-10-13T00:00:00Z", **body}
+            application = {"id": f"app-{self.next_id}", "status": "APPLICATION_STARTING", "creator": {"username": "cburns"}, "updated_at": "2026-10-13T00:00:00Z", **body, "environment": json.dumps(body["environment"])}
             self.next_id += 1
             self.applications[application["id"]] = application
             return httpx.Response(200, json=application)
@@ -49,7 +49,7 @@ class FakeWorkbench:
             body = json.loads(request.content)
             if not isinstance(body.get("environment", ""), str):  # what the real API answered
                 return httpx.Response(400, json={"error": "json: cannot unmarshal object into Go value of type string", "code": 3})
-            application.update({**body, "environment": json.loads(body["environment"]) if body.get("environment") else application["environment"]})
+            application.update({**body, "environment": body.get("environment") or application["environment"]})
             return httpx.Response(200, json=application)
         if request.method == "POST" and tail.endswith((":restart", ":stop")) and not request.content:
             return httpx.Response(404, json={"error": "Not Found", "code": 5})  # what the real API answered without a body
@@ -109,8 +109,8 @@ def test_cloudera_ai_provider_creates_updates_and_manages_the_application(regist
     assert created["status"] == "provisioning", created["message"]
     assert created["application_id"] == "app-1" and created["provider"] == "cloudera-ai"
     assert created["endpoint"] == "https://my-mcp-server-85d30f87.ml-abc.example.cloudera.site/mcp"
-    assert workbench.applications["app-1"]["environment"]["FACTORY_DEPLOYED_RELEASE_ID"] == first
-    assert workbench.applications["app-1"]["environment"]["FACTORY_PUBLIC_MCP_URL"] == created["endpoint"]
+    assert json.loads(workbench.applications["app-1"]["environment"])["FACTORY_DEPLOYED_RELEASE_ID"] == first
+    assert json.loads(workbench.applications["app-1"]["environment"])["FACTORY_PUBLIC_MCP_URL"] == created["endpoint"]
     # Refresh reads the live status; the Workbench moved it to running.
     workbench.applications["app-1"]["status"] = "APPLICATION_RUNNING"
     revision = client.get("/api/workspace").json()["server"]["revision"]
@@ -121,7 +121,7 @@ def test_cloudera_ai_provider_creates_updates_and_manages_the_application(regist
     revision = client.get("/api/workspace").json()["server"]["revision"]
     updated = client.post("/api/deployments", json={"revision": revision}).json()
     assert updated["application_id"] == "app-1" and updated["status"] == "running" and updated["deployed_release_id"] == second
-    assert workbench.applications["app-1"]["environment"]["FACTORY_DEPLOYED_RELEASE_ID"] == second
+    assert json.loads(workbench.applications["app-1"]["environment"])["FACTORY_DEPLOYED_RELEASE_ID"] == second
     assert ("POST", "/api/v2/projects/proj-1/applications/app-1:restart", "Bearer api-key-123") in workbench.calls
     revision = client.get("/api/workspace").json()["server"]["revision"]
     assert client.post("/api/deployments/stop", json={"revision": revision}).json()["status"] == "stopped"
@@ -223,4 +223,22 @@ def test_the_first_deploy_chooses_the_name_and_later_deploys_follow_the_applicat
     workbench.handler = lambda request: httpx.Response(500, json={"error": "boom"}) if request.method == "PATCH" else original(request)
     deployment.TRANSPORT = httpx.MockTransport(workbench.handler)
     failed = client.post("/api/deployments", json={"revision": rev()}).json()
-    assert failed["status"] == "failed" and failed["application_id"] == "app-1" and failed["application_name"] == "helios-mcp"
+    # Workbench is the truth for the application's name: the rename there was kept, and survives the failure.
+    assert failed["status"] == "failed" and failed["application_id"] == "app-1" and failed["application_name"] == "renamed-in-workbench"
+
+
+def test_deploy_adopts_an_application_that_already_serves_the_server(registry, workbench):
+    """An application someone created by hand for this server ID is updated, never duplicated."""
+    _, sessions, _ = registry
+    client = builder(registry)
+    workbench.applications["manual-1"] = {"id": "manual-1", "name": "MCP-Factory-Server", "subdomain": "mcp-factory-server", "status": "APPLICATION_RUNNING",
+        "script": "daedalus/mcp_server_app.py", "environment": json.dumps({"FACTORY_SERVER_ID": SERVER_ID, "FACTORY_MCP_TOKEN": "kept-by-the-user"})}
+    release = activate_release(sessions)
+    result = client.post("/api/deployments", json={"revision": client.get("/api/workspace").json()["server"]["revision"], "application_name": "my-mcp-server"}).json()
+    assert list(workbench.applications) == ["manual-1"]  # nothing new was created
+    assert result["application_id"] == "manual-1" and result["application_name"] == "MCP-Factory-Server"
+    assert result["message"].startswith("Adopted MCP-Factory-Server, which already served this server")
+    app = workbench.applications["manual-1"]
+    env = json.loads(app["environment"])
+    assert app["subdomain"] == "mcp-factory-server" and env["FACTORY_MCP_TOKEN"] == "kept-by-the-user" and env["FACTORY_DEPLOYED_RELEASE_ID"] == release
+    assert result["endpoint"] == "https://mcp-factory-server.ml-abc.example.cloudera.site/mcp"

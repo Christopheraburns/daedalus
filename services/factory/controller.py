@@ -102,7 +102,16 @@ def main():
     process = assets = None
     # Connection-scoped lock prevents two Server instances writing the same server.
     with engine.connect() as owner:
-        acquire_ownership(owner, server_id, float(os.getenv("FACTORY_LOCK_WAIT", "120")), stopped)
+        try:
+            acquire_ownership(owner, server_id, float(os.getenv("FACTORY_LOCK_WAIT", "120")), stopped)
+        except RuntimeError as exc:
+            # A second copy is otherwise invisible (it never owns the server); record it so the Builder can say so.
+            try:
+                with sessions.begin() as session:
+                    audit(session, "controller", "server.contended", server_id, host=socket.gethostname(), revision=REVISION, owner=describe_holder(owner, server_id), message=str(exc)[:500])
+            except SQLAlchemyError:
+                pass
+            raise
         with sessions() as session:
             server = session.get(Server, server_id)
             if server is None:

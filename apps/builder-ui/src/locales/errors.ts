@@ -68,6 +68,8 @@ export const backendErrors: BackendError[] = [
   { en: "This server's application already exists; delete it to deploy under another name", ko: '이 서버의 애플리케이션이 이미 있습니다. 다른 이름으로 배포하려면 삭제하세요' },
   { en: 'Application names use 3-63 lowercase letters, digits and hyphens, start with a letter and do not end with a hyphen', ko: '애플리케이션 이름은 소문자, 숫자, 하이픈 3~63자를 사용하며 문자로 시작하고 하이픈으로 끝나지 않아야 합니다' },
   { en: 'Another MCP server already uses this application name', ko: '다른 MCP 서버가 이미 이 애플리케이션 이름을 사용합니다' },
+  { en: 'Adopted {name}, which already served this server; Workbench application {status}', ko: '이 서버를 이미 서비스하던 {name}을(를) 넘겨받았습니다. Workbench 애플리케이션 {status}', pattern: /^Adopted (?<name>.+), which already served this server; Workbench application (?<status>\S+)$/ },
+  { en: 'Workbench application {status}', ko: 'Workbench 애플리케이션 {status}', pattern: /^Workbench application (?<status>\S+)$/ },
   { en: 'Candidate release failed: {detail}', ko: '후보 릴리스 실패: {detail}', pattern: /^Candidate release failed: (?<detail>[\s\S]*)$/ },
   { en: 'Could not load OpenAPI document: {detail}', ko: 'OpenAPI 문서를 불러올 수 없습니다: {detail}', pattern: /^Could not load OpenAPI document: (?<detail>[\s\S]*)$/ },
   { en: 'Unknown tool pack: {name}', ko: '알 수 없는 도구 팩입니다: {name}', pattern: /^Unknown tool pack: (?<name>.*)$/ },
