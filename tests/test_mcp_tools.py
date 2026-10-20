@@ -129,3 +129,17 @@ def test_repeated_gateway_log_lines_are_collapsed(tmp_path):
     log.write_text("\n".join([line.format(s=10 + i, p=50000 + i, d=90 + i) for i in range(5)] + ["2026-10-15T15:08:00Z\terror\trequest http.status=429 error=\"429 Too Many Requests\""]))
     tail = gateway_log_tail(log)
     assert len(tail) == 2 and tail[0].endswith("(x5)") and "src.addr" not in tail[0] and "server/discover" in tail[0] and "429" in tail[1]
+
+
+@gateway
+def test_a_server_with_mcp_tools_reviews_and_publishes_cleanly(registry):
+    """Regression: compiling a release must not trip over the connection's discovered-tools annotation."""
+    client, _, _ = registry
+    upstream = check(client, connection(client))
+    tool = client.post("/api/tools", json={"name": "sum", "description": "Add.", "kind": "mcp", "connection_id": upstream["id"], "upstream_tool": "add"}).json()
+    assert any("test the current definition" in p for p in client.get("/api/releases/preview").json()["problems"])
+    assert run(client, tool, {"body": {"a": 1, "b": 1}})["success"]
+    preview = client.get("/api/releases/preview").json()
+    assert preview["problems"] == [] and preview["added"] == ["sum"]
+    published = client.post("/api/releases", json={"revision": preview["revision"]})
+    assert published.status_code == 202, published.text

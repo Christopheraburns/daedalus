@@ -128,8 +128,12 @@ def create_app(settings=None):
 
     def snapshot(session, server_id):
         server_id = selected(server_id)
-        connections = {c.id: connection_bundle_spec(c) for c in session.scalars(select(Connection).where(Connection.server_id == server_id))}
-        tools = [{"id": t.id, "revision": t.revision, "spec": t.spec, "fingerprint": fingerprint(t.spec, connections.get(t.connection_id))} for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))]
+        rows = list(session.scalars(select(Connection).where(Connection.server_id == server_id)))
+        connections = {c.id: connection_bundle_spec(c) for c in rows}
+        # Fingerprints use the connection's settings only, exactly as a test records them; the discovered-tools
+        # annotation is compile input, and including it made tested MCP tools look untested.
+        settings_only = {c.id: c.spec for c in rows}
+        tools = [{"id": t.id, "revision": t.revision, "spec": t.spec, "fingerprint": fingerprint(t.spec, settings_only.get(t.connection_id))} for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))]
         return tools, connections
 
     def publish_checks(session, tools, server_id=None):

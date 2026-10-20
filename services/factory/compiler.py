@@ -20,6 +20,8 @@ def digest(value):
 
 
 def validate_connection(spec, allowed):
+    # Keys starting with "_" are compile-time annotations (e.g. an MCP connection's discovered tools), not settings.
+    spec = {key: value for key, value in spec.items() if not key.startswith("_")}
     ConnectionSpec.model_validate(spec)
     auth.validate(spec)
     protocol, mode = spec.get("protocol", "rest"), spec.get("auth_mode", "none")
