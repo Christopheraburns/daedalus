@@ -717,7 +717,7 @@ test('the servers area lists every server by name with its state', async ({ page
   const headers = { Authorization: `Bearer ${admin}` };
   const other = await (await page.request.post('http://127.0.0.1:18000/api/servers', { headers, data: { name: `Listed server ${suffix}` } })).json();
   await login(page);
-  await page.getByRole('button', { name: 'All servers' }).click();
+  await page.getByRole('button', { name: /^All servers:/ }).click();
   const dialog = page.getByRole('dialog', { name: 'MCP servers in this project' });
   const mine = dialog.locator('.server-card').filter({ hasText: 'My MCP server' });
   await expect(mine).toContainText('open now');
@@ -729,4 +729,30 @@ test('the servers area lists every server by name with its state', async ({ page
   await card.getByRole('button', { name: 'Open' }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.getByRole('combobox', { name: 'MCP server workspace' }).locator('option:checked')).toHaveText(`Listed server ${suffix}`);
+});
+
+test('the header summarises running servers and the overview shows this server live', async ({ page }) => {
+  await login(page);
+  // The checks stack runs a Server for the default workspace, so at least one server is running.
+  const summary = page.getByRole('button', { name: /^All servers: \d+ of \d+ servers running$/ });
+  await expect(summary).toContainText(/[1-9]\d* of \d+ servers running/);
+  const card = page.getByRole('region', { name: 'Live status of this MCP server' });
+  await expect(card).toContainText('Running');
+  await expect(card).toContainText('/mcp');
+  await expect(card).toContainText(/Heartbeat \d+s ago from pod/);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await card.getByRole('button', { name: 'Copy the MCP URL' }).click();
+  await expect(page.locator('.message-bar')).toContainText('MCP URL copied.');
+  await card.getByRole('button', { name: 'Deployment details' }).click();
+  await expect(page.getByRole('dialog', { name: 'Deployment & monitoring' })).toBeVisible();
+  await page.getByRole('dialog', { name: 'Deployment & monitoring' }).getByRole('button', { name: 'Close dialog' }).click();
+  await summary.click();
+  await expect(page.getByRole('dialog', { name: 'MCP servers in this project' })).toBeVisible();
+  // A server that never ran says so.
+  const headers = { Authorization: `Bearer ${admin}` };
+  const idle = await (await page.request.post('http://127.0.0.1:18000/api/servers', { headers, data: { name: `Idle ${suffix}` } })).json();
+  await page.getByRole('dialog', { name: 'MCP servers in this project' }).getByRole('button', { name: 'Close dialog' }).click();
+  await page.getByRole('combobox', { name: 'MCP server workspace' }).selectOption(idle.id);
+  await expect(card).toContainText('Not deployed');
+  await expect(card).toContainText('Publish a release, then deploy it');
 });
