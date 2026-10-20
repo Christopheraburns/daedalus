@@ -95,3 +95,36 @@ def test_deleting_a_server_removes_everything_and_refuses_while_it_is_served(reg
         assert session.get(Connection, connection["id"]) is None
         event = session.scalar(select(Audit).where(Audit.action == "server.delete"))
         assert event.details["name"] == "Doomed" and event.details["tools"] == 1 and event.details["connections"] == 1
+
+
+def test_a_release_no_server_will_apply_is_activated_by_the_builder(registry):
+    """A new server has no Server process yet and Workbench deployments are pinned to their release, so a
+    recorded (already candidate-checked) release must not wait forever for a Server to pick it up."""
+    from datetime import datetime, timezone
+    client, sessions, _ = registry
+    server_id = client.post("/api/servers", json={"name": "SondaHub"}).json()["id"]
+    bundle = {"tools": [], "connections": {}, "targets": [], "python_tools": [], "pack_sources": {}}
+
+    def request_release(runtime):
+        with sessions.begin() as session:
+            server = session.get(Server, server_id)
+            release = Release(id=new_id(), server_id=server_id, parent_id=server.active_release_id, bundle=bundle, checksum=digest(bundle), created_by="test")
+            session.add(release)
+            server.desired_release_id = release.id
+            server.runtime = runtime
+            return release.id
+
+    def statuses():
+        workspace = client.get("/api/workspace", params={"server_id": server_id}).json()
+        return workspace["server"]["active_release_id"], {r["id"]: r["status"] for r in workspace["releases"]}
+
+    first = request_release({})  # nothing is serving this server
+    assert statuses() == (first, {first: "active"})
+    live = datetime.now(timezone.utc).isoformat()
+    waiting = request_release({"heartbeat": live, "pinned_release_id": None})  # a live, unpinned Server applies it itself
+    assert statuses() == (first, {first: "active", waiting: "pending"})
+    with sessions.begin() as session:
+        session.get(Server, server_id).runtime = {"heartbeat": live, "pinned_release_id": first}  # a pinned Workbench deployment
+    assert statuses() == (waiting, {first: "superseded", waiting: "active"})
+    audits = client.get("/api/audit", params={"server_id": server_id}).json()
+    assert [a["details"]["reason"] for a in audits if a["action"] == "release.active"] == ["pinned Server; deploy to roll out", "no Server online for this server"]

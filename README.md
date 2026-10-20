@@ -26,6 +26,13 @@ runtime image has a different tag.
 3. Edit and save the tool, then validate it and run it in the test playground.
 4. Review and publish. Wait for the release to become active.
 
+Publishing runs the release in a temporary candidate gateway first. A running,
+unpinned Server for that MCP server then hot-swaps to it and verifies the switch.
+When no Server will (the server is not deployed yet, or it is a Workbench
+deployment pinned to `FACTORY_DEPLOYED_RELEASE_ID`), the Builder activates the
+release itself (audited as `release.active` with the reason); use **Deploy** to
+roll it out.
+
 Use **Import OpenAPI** in the left panel to inspect a Swagger/OpenAPI URL. The
 Builder lists supported GET and POST operations without creating tools. Select
 an operation to reuse an existing connection or create a new approved connection

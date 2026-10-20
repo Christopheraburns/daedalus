@@ -93,6 +93,7 @@ export const en = {
   stop_server_already: "{name} is already stopped",
   stop_server_confirm: "Stop the Workbench application {name}? Clients using {endpoint} lose access until it is started or deployed again.",
   notice_server_stopped: "Stopped {name} (now {status}). You can now delete the server.",
+  release_active_deploy_it: "Release {release} is active. Use Deploy to roll it out to the Workbench application.",
   new_server: "New server",
   design_test_publish_and_deploy_a: "Design, test, publish, and deploy a dedicated MCP server.",
   policies: "Policies",

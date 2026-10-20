@@ -127,7 +127,7 @@ def main():
             approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
             compile_bundle(bundle["tools"], bundle["connections"], approved)
         started_at = now().isoformat()
-        runtime = {"ready": False, "gateway_started_at": started_at, "effective_release_id": None, "last_error": None, "revision": REVISION, "host": socket.gethostname()}
+        runtime = {"ready": False, "gateway_started_at": started_at, "effective_release_id": None, "last_error": None, "revision": REVISION, "host": socket.gethostname(), "pinned_release_id": settings.deployed_release_id or None}
         try:
             # The gateway fails closed on unreachable targets, so the executor is ready before it starts.
             assets = prepare_assets(bundle, settings, release_id)

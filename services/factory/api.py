@@ -343,8 +343,14 @@ def create_app(settings=None):
 
     @app.get("/api/workspace")
     def workspace(server_id: str | None = Query(default=None), role=Depends(identity)):
+        server_id = selected(server_id)
+        with sessions.begin() as session:
+            # Releases requested before the Builder activated them itself (or whose Server stopped) would wait forever.
+            waiting = session.scalar(select(Server).join(Release, Release.id == Server.desired_release_id)
+                .where(Server.id == server_id, Release.status.in_(["pending", "applying"])).with_for_update(of=Server))
+            if waiting:
+                activate_unattended(session, waiting, "builder")
         with sessions() as session:
-            server_id = selected(server_id)
             server = get(session, Server, server_id)
             layout = get(session, Layout, server_id)
             deployment = session.scalar(select(Deployment).where(Deployment.server_id == server_id))
@@ -746,6 +752,28 @@ def create_app(settings=None):
                 "changed": [t["spec"]["name"] for id, t in after.items() if id in before and t["fingerprint"] != before[id]["fingerprint"]],
                 "removed": [t["spec"]["name"] for id, t in before.items() if id not in after] + [n for n in federated_before if n not in federated_after], "problems": problems}
 
+    def activate_unattended(session, server, actor):
+        """Activate the desired release when no Server will: none is online for this server, or the one online is
+        pinned to its deployed release (Workbench deployments are; Deploy rolls the new release out). Every release
+        passed the full candidate check (gateway, executor, catalog) before it was recorded, so only the hot swap
+        into a running gateway is skipped. Without this a new server could never get its first active release."""
+        desired = session.get(Release, server.desired_release_id) if server.desired_release_id else None
+        if desired is None or desired.status not in {"pending", "applying"}:
+            return None
+        runtime = server.runtime or {}
+        heartbeat = runtime.get("heartbeat")
+        online = bool(heartbeat and (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds() < 12)
+        if online and not runtime.get("pinned_release_id"):
+            return None  # a live, unpinned Server applies it and verifies the switch
+        previous = session.get(Release, server.active_release_id) if server.active_release_id else None
+        if previous and previous.id != desired.id:
+            previous.status = "superseded"
+        desired.status = "active"; desired.error = None
+        server.active_release_id = desired.id; server.revision += 1
+        audit(session, actor, "release.active", desired.id, checksum=desired.checksum, activated_by="builder",
+            reason="pinned Server; deploy to roll out" if online else "no Server online for this server")
+        return desired
+
     def enqueue(bundle, expected_revision, actor, server_id):
         if not slots.acquire(blocking=False):
             raise HTTPException(429, "Two tests/compilations are already running; try again shortly")
@@ -768,6 +796,7 @@ def create_app(settings=None):
             server.desired_release_id = release.id
             server.revision += 1
             audit(session, actor, "release.request", release.id, checksum=release.checksum)
+            activate_unattended(session, server, actor)
             return release_json(release)
 
     @app.post("/api/releases", status_code=202)

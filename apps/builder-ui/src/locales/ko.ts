@@ -97,6 +97,7 @@ export const ko: Record<Key, string> = {
   stop_server_already: '{name}은(는) 이미 중지되었습니다',
   stop_server_confirm: 'Workbench 애플리케이션 {name}을(를) 중지할까요? 다시 시작하거나 배포할 때까지 {endpoint}을(를) 사용하는 클라이언트가 접근할 수 없습니다.',
   notice_server_stopped: '{name}을(를) 중지했습니다(현재 상태: {status}). 이제 서버를 삭제할 수 있습니다.',
+  release_active_deploy_it: '릴리스 {release}이(가) 활성화되었습니다. 배포를 사용해 Workbench 애플리케이션에 적용하세요.',
   new_server: '새 서버',
   design_test_publish_and_deploy_a: '전용 MCP 서버를 설계, 테스트, 게시, 배포합니다.',
   policies: '정책',
