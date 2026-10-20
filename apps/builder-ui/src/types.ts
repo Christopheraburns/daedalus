@@ -24,7 +24,7 @@ export type ServerSummary = { id: string; name: string; revision: number; active
   runtime?: { online: boolean; ready: boolean; heartbeat_age: number | null; host: string | null; revision: string | null; effective_release_id: string | null } };
 export type Workspace = {
   identity: { role: string; mode: string };
-  server: { id: string; name: string; revision: number; active_release_id: string | null; desired_release_id: string | null; mcp_url: string; runtime: { online: boolean; ready?: boolean; gateway_pid?: number; gateway_started_at?: string; effective_release_id?: string | null; last_error?: string | null; revision?: string; host?: string } };
+  server: { id: string; name: string; revision: number; is_default?: boolean; active_release_id: string | null; desired_release_id: string | null; mcp_url: string; runtime: { online: boolean; ready?: boolean; gateway_pid?: number; gateway_started_at?: string; effective_release_id?: string | null; last_error?: string | null; revision?: string; host?: string } };
   connections: Connection[]; tools: Tool[];
   layout: { revision: number; positions: Record<string, { x: number; y: number }> };
   active_tools: { id: string; revision: number; spec: ToolSpec; fingerprint: string }[];

@@ -269,6 +269,41 @@ def create_app(settings=None):
                 operations.append({"method": method.upper(), "path": path, "name": operation.get("operationId") or f"{method}_{path.strip('/').replace('/', '_').replace('{', '').replace('}', '') or 'root'}", "description": operation.get("summary") or operation.get("description") or f"{method.upper()} {path}", "parameters": params, "body_schema": body if isinstance(body, dict) else None, "effect": "write" if method.lower() in {"post", "put", "patch", "delete"} else "read", "supported": method.lower() in {"get", "post"}})
         return {"title": (document.get("info") or {}).get("title", parsed.hostname), "version": (document.get("info") or {}).get("version", ""), "base_url": base_url.rstrip("/"), "operations": operations[:200], "truncated": len(operations) > 200}
 
+    @app.delete("/api/servers/{id}", status_code=204)
+    def delete_server(id: str, delete_application: bool = Query(default=True), if_match: str | None = Header(default=None), role=Depends(require())):
+        """Delete a whole MCP server: its tools, connections, origins, layout, releases and deployment record.
+        Its Workbench application is deleted too when Daedalus manages it; any other process still serving it
+        blocks the deletion, because a Server whose server disappears would fail in a loop."""
+        from .deployment import deployment_action as apply_action
+        if id == SERVER_ID:
+            raise HTTPException(409, "The default server workspace cannot be deleted")
+        with sessions.begin() as session:
+            server = session.scalar(select(Server).where(Server.id == id).with_for_update())
+            if server is None: raise HTTPException(404, "Record not found")
+            revision(server.revision, if_match)
+            deployment = session.scalar(select(Deployment).where(Deployment.server_id == id))
+            managed = deployment is not None and deployment.provider == "cloudera-ai" and deployment.application_id
+            if managed and delete_application:
+                try:
+                    apply_action("delete", deployment_json(deployment), settings)
+                except Exception as exc:
+                    raise HTTPException(502, f"Could not delete the Workbench application {deployment.application_name}: {safe_error(exc)}")
+            else:
+                owner = next((row for row in session.execute(OWNERS) if row.id == id), None)
+                heartbeat = (server.runtime or {}).get("heartbeat")
+                online = heartbeat and (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds() < 12
+                if owner or online or managed:
+                    who = owner.application_name if owner and owner.application_name else (deployment.application_name if managed else "a Server process")
+                    raise HTTPException(409, f"{who} is still serving this server; stop or delete its application first")
+            counts = {"tools": 0, "connections": 0, "releases": 0}
+            for model, key in ((Tool, "tools"), (Connection, "connections"), (Release, "releases"), (ApiOrigin, None), (Layout, None), (Deployment, None)):
+                for row in session.scalars(select(model).where(model.server_id == id)):
+                    session.delete(row)
+                    if key: counts[key] += 1
+            session.flush()
+            audit(session, role, "server.delete", id, name=server.name, application_deleted=bool(managed and delete_application), **counts)
+            session.delete(server)
+
     @app.post("/api/servers", status_code=201)
     def create_server(spec: ServerSpec, role=Depends(require("author"))):
         with sessions.begin() as session:
@@ -318,7 +353,7 @@ def create_app(settings=None):
             heartbeat = runtime.get("heartbeat")
             runtime["online"] = bool(heartbeat and (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds() < 12)
             return {"identity": {"role": role, "mode": settings.auth_mode},
-                "server": {"id": server.id, "name": server.name, "revision": server.revision, "desired_release_id": server.desired_release_id, "active_release_id": server.active_release_id, "mcp_url": settings.public_mcp_url, "runtime": runtime},
+                "server": {"id": server.id, "name": server.name, "revision": server.revision, "is_default": server.id == SERVER_ID, "desired_release_id": server.desired_release_id, "active_release_id": server.active_release_id, "mcp_url": settings.public_mcp_url, "runtime": runtime},
                 "connections": [connection_json(c) for c in session.scalars(select(Connection).where(Connection.server_id == server_id).order_by(Connection.id))],
                 "tools": [tool_json(session, t, server_id) for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))],
                 "layout": {"revision": layout.revision, "positions": layout.positions},

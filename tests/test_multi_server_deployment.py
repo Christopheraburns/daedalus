@@ -64,3 +64,34 @@ def test_the_server_listing_names_servers_and_shows_who_serves_them(registry):
         assert held["Customer support MCP"]["owner"] is None
     engine.dispose()
     assert other["id"] in {s["id"] for s in listing.values()}
+
+
+def test_deleting_a_server_removes_everything_and_refuses_while_it_is_served(registry):
+    import os
+    from sqlalchemy import select, text
+    from factory.db import Audit, Connection, Tool, database
+    client, sessions, settings = registry
+    viewer = {"Authorization": "Bearer " + os.environ["FACTORY_VIEWER_TOKEN"]}
+    author = {"Authorization": "Bearer " + os.environ["FACTORY_AUTHOR_TOKEN"]}
+    assert client.delete(f"/api/servers/{settings.server_id}", headers={"If-Match": "1"}).status_code == 409  # default workspace
+    doomed = client.post("/api/servers", json={"name": "Doomed"}).json()
+    connection = client.post(f"/api/connections?server_id={doomed['id']}", json={"name": "API", "base_url": "http://mock-api:8080"}).json()
+    client.post(f"/api/tools?server_id={doomed['id']}", json={"name": "echo", "description": "Echo.", "kind": "python", "pack": "demo", "function": "echo"})
+    revision = next(s for s in client.get("/api/servers").json() if s["id"] == doomed["id"])["revision"]
+    assert client.delete(f"/api/servers/{doomed['id']}", headers={**viewer, "If-Match": str(revision)}).status_code == 403
+    assert client.delete(f"/api/servers/{doomed['id']}", headers={**author, "If-Match": str(revision)}).status_code == 403
+    assert client.delete(f"/api/servers/{doomed['id']}", headers={"If-Match": "999"}).status_code == 409
+    # A process serving it blocks the deletion and is named.
+    engine, _ = database(os.environ["DATABASE_URL"], "daedalus-server doomed on pod-z")
+    with engine.connect() as owner:
+        owner.scalar(text("SELECT pg_try_advisory_lock(hashtext(current_schema()), hashtext(:s))"), {"s": doomed["id"]})
+        blocked = client.delete(f"/api/servers/{doomed['id']}", headers={"If-Match": str(revision)})
+        assert blocked.status_code == 409 and "pod-z" in blocked.json()["detail"]
+    engine.dispose()
+    assert client.delete(f"/api/servers/{doomed['id']}", headers={"If-Match": str(revision)}).status_code == 204
+    assert doomed["id"] not in {s["id"] for s in client.get("/api/servers").json()}
+    with sessions() as session:
+        assert not list(session.scalars(select(Tool).where(Tool.server_id == doomed["id"])))
+        assert session.get(Connection, connection["id"]) is None
+        event = session.scalar(select(Audit).where(Audit.action == "server.delete"))
+        assert event.details["name"] == "Doomed" and event.details["tools"] == 1 and event.details["connections"] == 1

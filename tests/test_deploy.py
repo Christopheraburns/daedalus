@@ -34,7 +34,7 @@ class FakeWorkbench:
         if request.method == "POST" and tail == "":
             body = json.loads(request.content)
             assert body["subdomain"] == body["name"] and body["script"] == "mcp_server_app.py" and body["runtime_identifier"] == "registry/mcp-factory-runtime:0.1.2"
-            assert body["environment"]["FACTORY_SERVER_ID"] == SERVER_ID and body["cpu"] == 1 and body["memory"] == 2 and body["bypass_authentication"] is True
+            assert body["environment"]["FACTORY_SERVER_ID"] and body["cpu"] == 1 and body["memory"] == 2 and body["bypass_authentication"] is True
             application = {"id": f"app-{self.next_id}", "status": "APPLICATION_STARTING", "creator": {"username": "cburns"}, "updated_at": "2026-10-13T00:00:00Z", **body, "environment": json.dumps(body["environment"])}
             self.next_id += 1
             self.applications[application["id"]] = application
@@ -242,3 +242,20 @@ def test_deploy_adopts_an_application_that_already_serves_the_server(registry, w
     env = json.loads(app["environment"])
     assert app["subdomain"] == "mcp-factory-server" and env["FACTORY_MCP_TOKEN"] == "kept-by-the-user" and env["FACTORY_DEPLOYED_RELEASE_ID"] == release
     assert result["endpoint"] == "https://mcp-factory-server.ml-abc.example.cloudera.site/mcp"
+
+
+def test_deleting_a_deployed_server_deletes_its_workbench_application(registry, workbench):
+    _, sessions, _ = registry
+    client = builder(registry)
+    other = client.post("/api/servers", json={"name": "Short lived"}).json()
+    with sessions.begin() as session:
+        from factory.db import Release, Server
+        server = session.get(Server, other["id"])
+        release = Release(server_id=other["id"], bundle={"tools": [], "connections": {}, "targets": [], "python_tools": [], "pack_sources": {}}, checksum="0" * 64, status="active", created_by="test")
+        session.add(release); session.flush(); server.active_release_id = release.id; server.revision += 1
+    revision = lambda: next(s for s in client.get("/api/servers").json() if s["id"] == other["id"])["revision"]
+    workbench_name = client.post(f"/api/deployments?server_id={other['id']}", json={"revision": revision(), "application_name": "short-lived"}).json()
+    assert workbench_name["application_id"] in workbench.applications
+    assert client.delete(f"/api/servers/{other['id']}?delete_application=false", headers={"If-Match": str(revision())}).status_code == 409  # its application would be orphaned
+    assert client.delete(f"/api/servers/{other['id']}", headers={"If-Match": str(revision())}).status_code == 204
+    assert workbench.applications == {}

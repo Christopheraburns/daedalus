@@ -756,3 +756,25 @@ test('the header summarises running servers and the overview shows this server l
   await expect(card).toContainText('Not deployed');
   await expect(card).toContainText('Publish a release, then deploy it');
 });
+
+test('an administrator deletes a whole MCP server after typing its name', async ({ page }) => {
+  const headers = { Authorization: `Bearer ${admin}` };
+  const doomed = await (await page.request.post('http://127.0.0.1:18000/api/servers', { headers, data: { name: `Delete me ${suffix}` } })).json();
+  await page.request.post(`http://127.0.0.1:18000/api/tools?server_id=${doomed.id}`, { headers, data: { name: 'gone', description: 'Deleted with its server.', kind: 'python', pack: 'demo', function: 'echo' } });
+  await login(page);
+  const picker = page.getByRole('combobox', { name: 'MCP server workspace' });
+  await picker.selectOption('85d30f87-b285-4d17-a89e-84bac6ac37bc');
+  await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeDisabled(); // the default workspace
+  await picker.selectOption(doomed.id);
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: `Delete Delete me ${suffix}` });
+  await expect(dialog).toContainText('1 tools · 0 connections · 0 releases');
+  const confirm = dialog.getByRole('button', { name: 'Delete this MCP server' });
+  await expect(confirm).toBeDisabled();
+  await dialog.getByLabel(`Type Delete me ${suffix} to confirm`).fill(`Delete me ${suffix}`);
+  await confirm.click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator('.message-bar')).toContainText(`Deleted Delete me ${suffix}.`);
+  await expect(picker.locator('option', { hasText: `Delete me ${suffix}` })).toHaveCount(0);
+  await expect(picker.locator('option:checked')).toHaveText('My MCP server');
+});

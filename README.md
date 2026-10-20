@@ -195,6 +195,20 @@ Release history is not carried over: test and publish in the new environment.
 The API equivalents are `GET /api/export?server_id=…` and
 `POST /api/servers/import`.
 
+## Deleting a server
+
+**Delete** (header, administrators) removes the selected server workspace and
+everything in it: tools, connections, approved origins, canvas layout, releases
+and the deployment record. Project tool packs are kept, because other servers may
+use them. The dialog shows what will be deleted, offers an Export first, and asks
+you to type the server's name. If Daedalus deployed the server to a Workbench
+application, *Also delete its Workbench application* (on by default) deletes that
+application too; otherwise the deletion is refused while any Server process still
+serves the server (the message names it), so stop that application first. The
+default server workspace cannot be deleted. Each deletion is audited
+(`server.delete`). API: `DELETE /api/servers/{id}?delete_application=true` with
+`If-Match: <server revision>`.
+
 ## Languages
 
 The Builder is available in English and Korean. The selector next to the signed-in
