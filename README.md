@@ -197,6 +197,12 @@ The API equivalents are `GET /api/export?server_id=…` and
 
 ## Deleting a server
 
+**Stop** (header, next to *New server*; publishers and administrators) stops the
+selected server's Workbench application after a confirmation, the same as *Stop*
+in the Deploy dialog. Clients lose access until it is started or deployed again.
+It is disabled when the server has no application, when it is already stopped,
+and in manual mode (stop the application in Workbench yourself).
+
 **Delete** (header, administrators) removes the selected server workspace and
 everything in it: tools, connections, approved origins, canvas layout, releases
 and the deployment record. Project tool packs are kept, because other servers may

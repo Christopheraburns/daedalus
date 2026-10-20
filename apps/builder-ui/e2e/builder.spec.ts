@@ -778,3 +778,28 @@ test('an administrator deletes a whole MCP server after typing its name', async 
   await expect(picker.locator('option', { hasText: `Delete me ${suffix}` })).toHaveCount(0);
   await expect(picker.locator('option:checked')).toHaveText('My MCP server');
 });
+
+test('the header Stop button stops the Workbench application after confirming', async ({ page }) => {
+  await login(page);
+  const stop = page.getByRole('button', { name: 'Stop', exact: true });
+  await expect(stop).toBeDisabled(); // nothing deployed yet
+  // Simulate a server Daedalus deployed to Workbench; the check stack runs in manual mode.
+  let status = 'running';
+  await page.route('**/api/workspace*', async route => {
+    const workspace = await (await route.fetch()).json();
+    const server = status === 'stopped' ? { ...workspace.server, runtime: { ...workspace.server.runtime, online: false, ready: false } } : workspace.server;
+    await route.fulfill({ json: { ...workspace, server, deployment: { ...workspace.deployment, provider: 'cloudera-ai', application_id: 'app-1', application_name: 'my-mcp-server', endpoint: 'https://my-mcp-server.example/mcp', status } } });
+  });
+  let stopped = 0;
+  await page.route('**/api/deployments/stop', async route => { stopped += 1; status = 'stopped'; await route.fulfill({ json: { status: 'stopped' } }); });
+  await page.reload();
+  await expect(stop).toBeEnabled();
+  page.once('dialog', dialog => { expect(dialog.message()).toContain('my-mcp-server'); void dialog.dismiss(); });
+  await stop.click();
+  expect(stopped).toBe(0); // cancelled
+  page.once('dialog', dialog => void dialog.accept());
+  await stop.click();
+  await expect(page.locator('.message-bar')).toContainText('Stopped my-mcp-server (now stopped). You can now delete the server.');
+  expect(stopped).toBe(1);
+  await expect(stop).toBeDisabled();
+});
