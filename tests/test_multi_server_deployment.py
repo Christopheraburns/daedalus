@@ -73,7 +73,6 @@ def test_deleting_a_server_removes_everything_and_refuses_while_it_is_served(reg
     client, sessions, settings = registry
     viewer = {"Authorization": "Bearer " + os.environ["FACTORY_VIEWER_TOKEN"]}
     author = {"Authorization": "Bearer " + os.environ["FACTORY_AUTHOR_TOKEN"]}
-    assert client.delete(f"/api/servers/{settings.server_id}", headers={"If-Match": "1"}).status_code == 409  # default workspace
     doomed = client.post("/api/servers", json={"name": "Doomed"}).json()
     connection = client.post(f"/api/connections?server_id={doomed['id']}", json={"name": "API", "base_url": "http://mock-api:8080"}).json()
     client.post(f"/api/tools?server_id={doomed['id']}", json={"name": "echo", "description": "Echo.", "kind": "python", "pack": "demo", "function": "echo"})
@@ -128,3 +127,22 @@ def test_a_release_no_server_will_apply_is_activated_by_the_builder(registry):
     assert statuses() == (waiting, {first: "superseded", waiting: "active"})
     audits = client.get("/api/audit", params={"server_id": server_id}).json()
     assert [a["details"]["reason"] for a in audits if a["action"] == "release.active"] == ["pinned Server; deploy to roll out", "no Server online for this server"]
+
+
+def test_deleting_the_default_workspace_empties_it_instead(registry):
+    from sqlalchemy import select
+    from factory.db import Audit
+    from tests.conftest import add_tool
+    client, sessions, settings = registry
+    add_tool(client)
+    before = client.get("/api/workspace").json()
+    assert before["server"]["is_default"] and len(before["tools"]) == 1 and len(before["connections"]) == 1
+    assert client.delete(f"/api/servers/{settings.server_id}", headers={"If-Match": str(before["server"]["revision"])}).status_code == 204
+    after = client.get("/api/workspace").json()
+    assert after["server"]["id"] == settings.server_id and after["server"]["name"] == "My MCP server" and after["server"]["is_default"]
+    assert after["tools"] == [] and after["connections"] == [] and after["releases"] == [] and after["server"]["active_release_id"] is None
+    assert after["deployment"]["status"] == "not_deployed" and after["server"]["revision"] > before["server"]["revision"]
+    assert [s["id"] for s in client.get("/api/servers").json()] == [settings.server_id]
+    with sessions.begin() as session:
+        entry = session.scalars(select(Audit).where(Audit.action == "server.empty")).one()
+        assert entry.details["tools"] == 1 and entry.details["connections"] == 1

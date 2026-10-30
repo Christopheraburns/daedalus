@@ -47,15 +47,6 @@ class KeyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-def materialize(bundle, directory):
-    """Write the release's project pack snapshot next to the bundle for import."""
-    folder = Path(directory) / "packs"
-    folder.mkdir(parents=True, exist_ok=True)
-    for name, source in bundle.get("pack_sources", {}).items():
-        (folder / f"{name}.py").write_text(source)
-    return folder
-
-
 def call_upstream(name, wrap_body, context, arguments):
     """An MCP tool: call the upstream server as the caller, with the connection's credentials."""
     if wrap_body:
@@ -81,15 +72,15 @@ def call_upstream(name, wrap_body, context, arguments):
     return {"content": content}
 
 
-def build_app(bundle, key, default_user="development", directory="."):
+def build_app(bundle, key, default_user="development"):
     tools = {}
-    search = [materialize(bundle, directory)]
+    sources = bundle.get("pack_sources", {})  # the release's snapshot of non-built-in packs, imported from memory
     for tool in bundle.get("python_tools", []):
         connection = bundle["connections"].get(tool["connection_id"]) if tool.get("connection_id") else None
         if tool.get("kind") == "mcp":
             function = functools.partial(call_upstream, tool["upstream_tool"], tool.get("wrap_body", False))
         else:
-            pack_function = packs.resolve(tool["pack"], tool["function"], search)
+            pack_function = packs.resolve(tool["pack"], tool["function"], sources=sources)
             function = lambda context, arguments, f=pack_function: f(context, **arguments)
         tools[tool["name"]] = (tool, function, connection, Draft202012Validator(tool["input_schema"]))
 
@@ -136,7 +127,7 @@ def main():
     if len(key) < 32:
         raise SystemExit("FACTORY_EXECUTOR_KEY must be set by the supervising process")
     bundle = json.loads(Path(options.bundle).read_text())
-    app = build_app(bundle, key, os.getenv("FACTORY_EXECUTOR_DEFAULT_USER", "development"), Path(options.bundle).parent)
+    app = build_app(bundle, key, os.getenv("FACTORY_EXECUTOR_DEFAULT_USER", "development"))
     log.info("serving %d Python tools on %s:%d", len(bundle.get("python_tools", [])), options.host, options.port)
     uvicorn.run(app, host=options.host, port=options.port, log_level="warning", access_log=False)
 

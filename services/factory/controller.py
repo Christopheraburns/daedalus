@@ -15,6 +15,7 @@ from pathlib import Path
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from . import packstore
 from .compiler import compile_bundle, digest
 from .db import ApiOrigin, Release, Server, audit, database, now
 from .gateway import candidate, gateway_config, materialize_secrets, start_executor, stop_process, validate_config, verify_effective, write_atomic
@@ -71,7 +72,7 @@ def describe_holder(owner, server_id):
 
 def acquire_ownership(owner, server_id, wait, stopped):
     """One Server process per logical server. Wait a while for a previous copy to let go: during a
-    Workbench restart the old pod can still hold the lock, or Postgres may not yet have noticed it is gone."""
+    restart the old process can still hold the lock, or Postgres may not yet have noticed it is gone."""
     deadline = time.monotonic() + wait
     announced = 0.0
     while not owner.scalar(text(LOCK), {"server_id": server_id}):
@@ -112,7 +113,7 @@ def main():
             except SQLAlchemyError:
                 pass
             raise
-        with sessions() as session:
+        with sessions.begin() as session:
             server = session.get(Server, server_id)
             if server is None:
                 raise RuntimeError("Run registry migrations before launching Server")
@@ -125,7 +126,7 @@ def main():
                 raise RuntimeError("Last active release failed integrity verification")
             # Revalidate approved origins at every startup, including saved releases.
             approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
-            compile_bundle(bundle["tools"], bundle["connections"], approved)
+            compile_bundle(bundle["tools"], bundle["connections"], approved, resolver=packstore.resolver_from_sources(session, bundle.get("pack_sources", {})), pack_sources=bundle.get("pack_sources", {}))
         started_at = now().isoformat()
         runtime = {"ready": False, "gateway_started_at": started_at, "effective_release_id": None, "last_error": None, "revision": REVISION, "host": socket.gethostname(), "pinned_release_id": settings.deployed_release_id or None}
         try:
@@ -165,8 +166,9 @@ def main():
                         try:
                             if digest(next_bundle) != checksum:
                                 raise ValueError("Release checksum mismatch")
-                            approved = [row.origin for row in session.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
-                            compile_bundle(next_bundle["tools"], next_bundle["connections"], approved)
+                            with sessions.begin() as check:
+                                approved = [row.origin for row in check.scalars(select(ApiOrigin).where(ApiOrigin.server_id == server_id, ApiOrigin.enabled.is_(True)))] or settings.allowed_origins
+                                compile_bundle(next_bundle["tools"], next_bundle["connections"], approved, resolver=packstore.resolver_from_sources(check, next_bundle.get("pack_sources", {})), pack_sources=next_bundle.get("pack_sources", {}))
                             with candidate(next_bundle, settings) as (_, _, next_catalog):
                                 # The previous executor keeps serving until the gateway has switched and verified.
                                 next_assets = prepare_assets(next_bundle, settings, next_id)

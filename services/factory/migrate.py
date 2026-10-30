@@ -1,6 +1,7 @@
 from alembic import command
 from alembic.config import Config
 
+from . import packstore
 from .db import ApiOrigin, Deployment, Layout, Server, database
 from .settings import ROOT, SERVER_ID, Settings
 
@@ -18,6 +19,10 @@ def main():
             for origin in settings.allowed_origins:
                 if origin:
                     session.add(ApiOrigin(server_id=SERVER_ID, origin=origin, description="Environment bootstrap origin"))
+        # Packs that earlier versions kept as files in project storage move into the registry once.
+        moved = packstore.import_legacy_files(session, settings)
+        if moved:
+            print(f"Imported project packs from {packstore.packs.project_dir()}: {', '.join(moved)}")
     engine.dispose()
 
 

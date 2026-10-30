@@ -167,6 +167,14 @@ def create_note(ctx: ToolContext, text: str) -&gt; dict:
 <li><strong>Deleting a pack</strong> is refused while any tool still uses it. Remove or reassign those tools first.</li>
 </ul>
 
+<h2 id="origins">Where packs come from and where they live</h2>
+<ul>
+<li><strong>Built-in packs</strong> (<code>demo</code>, <code>hdfs</code>, <code>s3</code>, <code>rest</code>) ship in the code and are read-only.</li>
+<li><strong>Seed packs</strong> ship in the code too, but stay off until an administrator enables them in <em>TOOL PACKS → ⚙ Seed packs</em>, or the application is started with <code>FACTORY_PACKS_ENABLED=name,name</code>. A seed costs nothing until it is on. Editing a seed makes a project copy that replaces it; a <em>newer seed available</em> tag appears when a later version ships, and deleting the copy adopts it.</li>
+<li><strong>Project packs</strong> are written here and stored in the registry database, not in project storage. A Builder restarted on another pod sees the same packs, and nothing is written to the filesystem.</li>
+</ul>
+<p>Whatever its origin, every release snapshots the exact pack source it uses, so a published server never changes when a pack is edited, enabled or disabled later.</p>
+
 <h2 id="errors">Common validation errors</h2>
 <table>
 <tr><th>Message</th><th>Fix</th></tr>

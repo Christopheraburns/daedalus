@@ -1,5 +1,6 @@
-# Allowlist: project files, credentials, and future customer configs stay out.
+# Allowlist: only what the two images need. Credentials, data and local state never enter a build context.
 **
+# Workbench runtime image (runtime/Dockerfile)
 !runtime/
 !runtime/Dockerfile
 !runtime/requirements.lock
@@ -8,3 +9,13 @@
 !runtime/bin/mcp-factory-python
 !runtime/licenses/
 !runtime/licenses/agentgateway-LICENSE
+# Generic container image (deploy/container/Dockerfile)
+!deploy/container/**
+!services/**
+!schemas/**
+services/**/__pycache__/
+!apps/builder-ui/**
+apps/builder-ui/node_modules/
+apps/builder-ui/dist/
+apps/builder-ui/test-results/
+apps/builder-ui/playwright-report/

@@ -1,0 +1,100 @@
+# Daedalus Builder on Kubernetes with the kubernetes deployment provider: Deploy in the Builder creates one
+# Deployment and Service per MCP server in this namespace. Supply the registry (PostgreSQL) and the secrets
+# yourself; this file shows the objects and the RBAC the Builder's service account needs.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: daedalus-builder
+  namespace: mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: daedalus-builder
+  namespace: mcp
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: daedalus-builder
+  namespace: mcp
+subjects:
+  - kind: ServiceAccount
+    name: daedalus-builder
+    namespace: mcp
+roleRef:
+  kind: Role
+  name: daedalus-builder
+  apiGroup: rbac.authorization.k8s.io
+---
+# Values the Builder and every Server it creates share. Put real values in a Secret and reference it instead.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daedalus
+  namespace: mcp
+type: Opaque
+stringData:
+  DATABASE_URL: postgresql+psycopg://factory:CHANGE-ME@postgres.mcp.svc:5432/factory
+  FACTORY_MCP_TOKEN: CHANGE-ME-32-random-characters
+  FACTORY_ADMINISTRATOR_TOKEN: CHANGE-ME-32-random-characters
+  FACTORY_AUTHOR_TOKEN: CHANGE-ME-32-random-characters
+  FACTORY_PUBLISHER_TOKEN: CHANGE-ME-32-random-characters
+  FACTORY_VIEWER_TOKEN: CHANGE-ME-32-random-characters
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daedalus-builder
+  namespace: mcp
+  labels: { app.kubernetes.io/name: daedalus-builder }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: daedalus-builder }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: daedalus-builder }
+    spec:
+      serviceAccountName: daedalus-builder
+      containers:
+        - name: builder
+          image: YOUR_REGISTRY/daedalus:0.1.0   # built from deploy/container/Dockerfile
+          args: ["builder"]
+          ports: [{ name: http, containerPort: 8000 }]
+          envFrom: [{ secretRef: { name: daedalus } }]
+          env:
+            - { name: FACTORY_AUTH_MODE, value: development-token }
+            - { name: FACTORY_DEPLOYMENT_PROVIDER, value: kubernetes }
+            - { name: FACTORY_SERVER_IMAGE, value: YOUR_REGISTRY/daedalus:0.1.0 }
+            # Where clients reach each Server; {name} is the deployment name. Default: http://{name}.mcp.svc:8081/mcp
+            # - { name: FACTORY_ENDPOINT_TEMPLATE, value: "https://{name}.mcp.example.com/mcp" }
+            - { name: FACTORY_ALLOWED_API_ORIGINS, value: "" }
+            - { name: FACTORY_BROWSER_ORIGINS, value: "https://daedalus.mcp.example.com" }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 30 }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          securityContext: { runAsNonRoot: true, allowPrivilegeEscalation: false }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: daedalus-builder
+  namespace: mcp
+spec:
+  selector: { app.kubernetes.io/name: daedalus-builder }
+  ports: [{ name: http, port: 80, targetPort: http }]

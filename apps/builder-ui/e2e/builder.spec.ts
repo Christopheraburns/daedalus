@@ -631,7 +631,7 @@ test('manual deployment explains itself and shows what to create in Workbench', 
   await expect(dialog).toContainText(`checks-${suffix.toLowerCase()}`);
   await expect(dialog.locator('.result-time')).toContainText('last result');
   await expect(dialog).toContainText('ready to deploy');
-  await expect(dialog).toContainText('CREATE THE SERVER APPLICATION BY HAND');
+  await expect(dialog).toContainText('CREATE THE SERVER BY HAND');
   await expect(dialog.locator('.manifest-env')).toContainText('FACTORY_SERVER_ID=');
   await expect(dialog).toContainText('mcp_server_app.py');
 });
@@ -655,9 +655,9 @@ test('the deploy dialog follows a provisioning application until it runs', async
   await page.getByRole('button', { name: 'Deploy', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Deployment & monitoring' });
   await expect(dialog).toContainText('provisioning');
-  await expect(dialog).toContainText('Checking Workbench every 5 seconds');
+  await expect(dialog).toContainText('Checking Manual every 5 seconds');
   await expect(dialog.locator('.tool-status')).toHaveText('running', { timeout: 20_000 });
-  await expect(dialog).not.toContainText('Checking Workbench every 5 seconds');
+  await expect(dialog).not.toContainText('Checking Manual every 5 seconds');
   // The endpoint label and URL are separated.
   const row = dialog.locator('.detail-row').filter({ hasText: endpoint });
   const label = await row.locator('span').first().boundingBox();
@@ -721,7 +721,7 @@ test('the servers area lists every server by name with its state', async ({ page
   const dialog = page.getByRole('dialog', { name: 'MCP servers in this project' });
   const mine = dialog.locator('.server-card').filter({ hasText: 'My MCP server' });
   await expect(mine).toContainText('open now');
-  await expect(mine).toContainText('Online on pod'); // the checks stack runs a Server for the default workspace
+  await expect(mine).toContainText('Online on '); // the checks stack runs a Server for the default workspace
   await expect(mine).toContainText('Owned by');
   const card = dialog.locator('.server-card').filter({ hasText: `Listed server ${suffix}` });
   await expect(card).toContainText(`ID ${other.id.slice(0, 8)}`);
@@ -739,7 +739,7 @@ test('the header summarises running servers and the overview shows this server l
   const card = page.getByRole('region', { name: 'Live status of this MCP server' });
   await expect(card).toContainText('Running');
   await expect(card).toContainText('/mcp');
-  await expect(card).toContainText(/Heartbeat \d+s ago from pod/);
+  await expect(card).toContainText(/Heartbeat \d+s ago from \S+\./);
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await card.getByRole('button', { name: 'Copy the MCP URL' }).click();
   await expect(page.locator('.message-bar')).toContainText('MCP URL copied.');
@@ -764,7 +764,12 @@ test('an administrator deletes a whole MCP server after typing its name', async 
   await login(page);
   const picker = page.getByRole('combobox', { name: 'MCP server workspace' });
   await picker.selectOption('85d30f87-b285-4d17-a89e-84bac6ac37bc');
-  await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeDisabled(); // the default workspace
+  const header = page.getByRole('button', { name: 'Delete', exact: true });
+  await expect(header).toBeEnabled(); // the default workspace is emptied rather than removed
+  await expect(header).toHaveAttribute('title', /Empty the default server workspace/);
+  await header.click();
+  await expect(page.getByRole('dialog', { name: 'Empty My MCP server' }).getByRole('button', { name: 'Empty this MCP server' })).toBeDisabled();
+  await page.keyboard.press('Escape');
   await picker.selectOption(doomed.id);
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: `Delete Delete me ${suffix}` });
@@ -779,11 +784,11 @@ test('an administrator deletes a whole MCP server after typing its name', async 
   await expect(picker.locator('option:checked')).toHaveText('My MCP server');
 });
 
-test('the header Stop button stops the Workbench application after confirming', async ({ page }) => {
+test('the header Stop button stops the deployed application after confirming', async ({ page }) => {
   await login(page);
   const stop = page.getByRole('button', { name: 'Stop', exact: true });
   await expect(stop).toBeDisabled(); // nothing deployed yet
-  // Simulate a server Daedalus deployed to Workbench; the check stack runs in manual mode.
+  // Simulate a server Daedalus deployed through the cloudera-ai provider; the check stack runs in manual mode.
   let status = 'running';
   await page.route('**/api/workspace*', async route => {
     const workspace = await (await route.fetch()).json();
@@ -802,4 +807,25 @@ test('the header Stop button stops the Workbench application after confirming', 
   await expect(page.locator('.message-bar')).toContainText('Stopped my-mcp-server (now stopped). You can now delete the server.');
   expect(stopped).toBe(1);
   await expect(stop).toBeDisabled();
+});
+
+test('an administrator switches a seed pack on and its tools appear in the palette', async ({ page }) => {
+  await login(page);
+  const palette = page.locator('.palette');
+  await palette.getByRole('button', { name: 'Seed packs' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Seed packs' });
+  const card = dialog.locator('.seed-card', { hasText: 'webhdfs_admin' });
+  await expect(card).toContainText('5 tools');
+  if (await card.getByRole('checkbox').isChecked()) { await card.getByRole('checkbox').uncheck(); await expect(page.locator('.message-bar')).toContainText('Seed pack webhdfs_admin is off.'); }
+  await card.getByRole('checkbox').check();
+  await expect(page.locator('.message-bar')).toContainText('Seed pack webhdfs_admin is on');
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  const pack = palette.getByRole('button', { name: 'Show or hide the webhdfs_admin pack' });
+  await expect(pack).toBeVisible();
+  await expect(palette.locator('.pack-group', { hasText: 'webhdfs_admin' })).toContainText('seed');
+  await pack.click();
+  await expect(palette.locator('.pack-group', { hasText: 'webhdfs_admin' }).getByRole('button', { name: /get_content_summary/ })).toBeVisible();
+  await palette.getByRole('button', { name: 'Seed packs' }).click();
+  await page.getByRole('dialog', { name: 'Seed packs' }).locator('.seed-card', { hasText: 'webhdfs_admin' }).getByRole('checkbox').uncheck();
+  await expect(page.locator('.message-bar')).toContainText('Seed pack webhdfs_admin is off.');
 });

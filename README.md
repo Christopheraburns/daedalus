@@ -86,6 +86,61 @@ request traces are disabled because requests contain local credentials.
 For a fresh test database, use `down -v` with the same `-p daedalus-checks`
 and environment-file arguments before starting the test project again.
 
+## Run as containers anywhere
+
+Daedalus does not depend on Cloudera AI Workbench. The services read their
+configuration from `FACTORY_*` environment variables and `DATABASE_URL` only, and
+[deploy/container/Dockerfile](deploy/container/Dockerfile) packages the Builder
+and the Server in one image built from `python:3.12-slim` (the UI is built in a
+Node stage; agentgateway is pinned by checksum for amd64 and arm64; the Python set
+is the same lock as the Workbench runtime). The entrypoint takes one command:
+`builder` (migrates the registry, then serves the UI and API on
+`FACTORY_BUILDER_PORT`, default 8000), `server` (serves the MCP server named by
+`FACTORY_SERVER_ID` on `FACTORY_GATEWAY_PORT`, default 8081) or `migrate`. In a
+container both listen on all interfaces; set `FACTORY_BUILDER_BIND` or
+`FACTORY_GATEWAY_BIND` to change that. The image records its Git revision in
+`FACTORY_CODE_REVISION`, which `/healthz` and the UI show.
+
+```sh
+docker build -f deploy/container/Dockerfile --build-arg GIT_REVISION=$(git rev-parse --short=12 HEAD) -t daedalus:local .
+docker compose -f deploy/container/compose.yaml --env-file .env up -d
+```
+
+[deploy/container/compose.yaml](deploy/container/compose.yaml) is the reference
+deployment: PostgreSQL, the Builder, and one Server container per MCP server
+(copy the `server` service and change `FACTORY_SERVER_ID` for each additional
+server). Health: the Builder answers `GET /healthz` and `GET /readyz`; a Server
+answers on its MCP port once its release is live, and its heartbeat shows in the
+Builder.
+
+### Deployment providers
+
+`FACTORY_DEPLOYMENT_PROVIDER` chooses how the Builder's **Deploy** turns a published
+release into a running Server. Every provider implements the same interface
+([services/factory/providers](services/factory/providers)): deploy, refresh, stop,
+delete, plus the facts the Deploy dialog shows (what it creates, the endpoint
+pattern, configuration problems).
+
+| Provider | Creates | Needs |
+|---|---|---|
+| `manual` (default) | nothing; shows the name, image and environment to create by hand | |
+| `docker` | one container per MCP server, through the Docker Engine API | the Docker socket mounted into the Builder and usable by the Builder's unprivileged user: on Linux grant the socket's group (`DOCKER_GID` in the reference compose), on Docker Desktop run the Builder as root (`DAEDALUS_BUILDER_USER=0`) because the socket is mounted `root:root 755`; or `FACTORY_DOCKER_HOST=tcp://…`. Also `FACTORY_SERVER_IMAGE`; optional `FACTORY_DOCKER_NETWORK`, `FACTORY_DOCKER_PUBLISH` (host port, default on), `FACTORY_DOCKER_HOST_NAME` (for the endpoint) |
+| `kubernetes` | one Deployment and Service per MCP server | a service account with the Role in [deploy/kubernetes/builder.yaml](deploy/kubernetes/builder.yaml) (or `FACTORY_K8S_API_URL` + `FACTORY_K8S_TOKEN`), `FACTORY_SERVER_IMAGE`; optional `FACTORY_K8S_NAMESPACE`, `FACTORY_K8S_CPU`, `FACTORY_K8S_MEMORY`, `FACTORY_K8S_IMAGE_PULL_SECRET`. Verified with the Builder running in a [kind](https://kind.sigs.k8s.io) cluster: `kind load docker-image daedalus:local`, apply the manifest with your image and a PostgreSQL Service, then Deploy from the Builder |
+| `cloudera-ai` | a Cloudera AI Workbench application | `FACTORY_CAI_*` (filled from `CDSW_*` by the Workbench launcher) |
+| `cloudera-bridge` | a customer bridge's application (legacy) | `FACTORY_CLOUDERA_*` |
+
+`FACTORY_ENDPOINT_TEMPLATE` (for example `https://{name}.mcp.example.com/mcp`) sets
+the endpoint clients are told about when an ingress fronts the Servers; otherwise
+docker reports the published host port and kubernetes the in-cluster Service
+address. Servers started by the docker and kubernetes providers receive the
+Builder's `DATABASE_URL`, `FACTORY_MCP_TOKEN`, `FACTORY_AUTH_MODE`,
+`FACTORY_ALLOWED_API_ORIGINS`, JWT settings and every `FACTORY_SECRET_*` variable,
+plus `FACTORY_SERVER_ID` and the pinned `FACTORY_DEPLOYED_RELEASE_ID`. A redeploy
+recreates a container under the same name (keeping its host port) or patches the
+Deployment; Stop stops the container or scales the Deployment to zero; Delete
+removes it. Deploy also adopts a container or Deployment that already carries the
+server's label, so a lost registry record does not produce a duplicate.
+
 ## Cloudera Workbench preparation
 
 The runtime image supplies dependencies; this repository supplies application
@@ -135,7 +190,13 @@ server in the same Workbench project. A dedicated Server application must set
 Use [the Server Application template](deploy/workbench/server-application.template.yaml)
 to configure its runtime, launcher, registry access, and endpoint.
 
-For the Builder application, set the Workbench application script to the
+Workbench is one platform adapter: [deploy/workbench/workbench_env.py](deploy/workbench/workbench_env.py)
+translates what Workbench provides (`CDSW_APP_PORT`, `CDSW_DOMAIN`, `CDSW_APIV2_KEY`,
+`CDSW_PROJECT_ID`, `MCP_FACTORY_RUNTIME_IMAGE`, the project PostgreSQL's host file)
+into the `FACTORY_*` variables and `DATABASE_URL` the services read, and the
+launchers under `deploy/workbench/` supervise the process the way Workbench
+applications need. Explicit `FACTORY_*` values set on the application win over the
+derived ones. For the Builder application, set the Workbench application script to the
 repository-root `app.py`. It delegates to `deploy/workbench/launch_builder.py`,
 uses the `CDSW_APP_PORT` supplied by Workbench, and serves the built UI and
 management API. Each generated MCP Server is a separate application; use
@@ -149,7 +210,8 @@ Create the applications using these scripts:
   API on the same application port.
 - Server: `deploy/workbench/launch_server.py` runs the controller and MCP gateway.
 
-The Builder has a **Deploy** panel with three providers (`FACTORY_DEPLOYMENT_PROVIDER`):
+The Builder's **Deploy** panel uses the provider chosen by `FACTORY_DEPLOYMENT_PROVIDER`
+(see [Deployment providers](#deployment-providers) for the full list). On Workbench:
 
 - `manual` (default) records a reviewable application intent and returns
   `ready_to_deploy`; create the application from the template by hand.
@@ -179,7 +241,7 @@ restart the Builder and Server applications (stop and start if a restart does no
 take). The Builder's `/healthz` reports the code revision its process loaded, so you
 can confirm the restart picked up the pull.
 
-Both launchers relay the Builder's or controller's output into the application log and keep a copy in project storage (`~/.daedalus/logs/builder.log` and `~/.daedalus/logs/server-<first 8 characters of FACTORY_SERVER_ID>.log`, with the previous run kept as `*.previous.log`; override the folder with `FACTORY_LOG_DIR`). When the child exits with an error, the launcher's error message ends with its last 40 lines.
+Both launchers relay the Builder's or controller's output into the application log. A copy in project storage is opt-in: set `FACTORY_LOG_DIR` (for example `/home/cdsw/.daedalus/logs`) and each run writes `<name>.log`, keeping the previous run as `<name>.previous.log`. When a process exits with an error, the launcher raises with the time, code revision, host and the last 40 output lines, so the cause shows in the Workbench application page.
 
 The launchers require Workbench's `CDSW_APP_PORT`. They default to loopback
 binding; verify the deployment's ingress requirements before overriding
@@ -204,23 +266,26 @@ The API equivalents are `GET /api/export?server_id=…` and
 
 ## Deleting a server
 
-**Stop** (header, next to *New server*; publishers and administrators) stops the
-selected server's Workbench application after a confirmation, the same as *Stop*
-in the Deploy dialog. Clients lose access until it is started or deployed again.
-It is disabled when the server has no application, when it is already stopped,
-and in manual mode (stop the application in Workbench yourself).
+**Stop** (header, next to *New server*; publishers and administrators) stops what
+the provider created for the selected server (its container, Deployment or
+application) after a confirmation, the same as *Stop* in the Deploy dialog.
+Clients lose access until it is started or deployed again. It is disabled when
+the server has not been deployed, when it is already stopped, and in manual mode
+(stop the process yourself, where you created it).
 
 **Delete** (header, administrators) removes the selected server workspace and
 everything in it: tools, connections, approved origins, canvas layout, releases
 and the deployment record. Project tool packs are kept, because other servers may
 use them. The dialog shows what will be deleted, offers an Export first, and asks
-you to type the server's name. If Daedalus deployed the server to a Workbench
-application, *Also delete its Workbench application* (on by default) deletes that
-application too; otherwise the deletion is refused while any Server process still
-serves the server (the message names it), so stop that application first. The
-default server workspace cannot be deleted. Each deletion is audited
-(`server.delete`). API: `DELETE /api/servers/{id}?delete_application=true` with
-`If-Match: <server revision>`.
+you to type the server's name. If Daedalus deployed the server, *Also delete its
+container / Deployment / Workbench application* (on by default) deletes that too;
+with it unticked the deployment must already be stopped, and the deletion is
+refused while any Server process still serves the server (the message names it).
+The default server workspace cannot be removed, because requests without a
+`server_id` land in it; *Delete* empties it instead (same dialog, titled *Empty*):
+everything in it is deleted and its name resets to *My MCP server*. Deletions are
+audited as `server.delete`, emptying as `server.empty`. API:
+`DELETE /api/servers/{id}?delete_application=true` with `If-Match: <server revision>`.
 
 ## Languages
 
@@ -342,14 +407,23 @@ functions in a *pack* under `services/factory/packs/`. A tool record with
 the MCP input schema and its docstring the description. `GET /api/packs` lists what
 is available. The `demo` pack (`echo`, `whoami`, `fetch_json`) exercises the path.
 
-Packs come from two places. *Built-in* packs ship in the runtime image and are
-read-only. *Project* packs are written by administrators in the Builder (TOOL
-PACKS → +), stored as files under `FACTORY_PACKS_DIR` (default
-`~/daedalus-packs`, which Workbench shares between the Builder and Server
-applications), validated in an isolated subprocess on save, and visible in the
-palette immediately: no push, image rebuild or application restart. Every release
-snapshots the project pack code it uses, so editing a pack later invalidates test
-evidence for its tools but never changes a published server. Anyone can view pack
+Packs come from three places. *Built-in* packs ship in the runtime image and are
+read-only. *Seed* packs (`services/factory/seedpacks/`) ship in the code too but
+are inert until enabled: set `FACTORY_PACKS_ENABLED=webhdfs_admin,...` on the
+Builder application, or switch them on in TOOL PACKS → ⚙ *Seed packs* (a toggle
+stored in the registry overrides the environment per pack). Editing a seed makes a
+project copy that shadows it; the Builder flags the copy when a newer seed ships,
+and deleting the copy adopts it. *Project* packs are written by administrators in
+the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored
+in the registry (`packs` table) and visible in the palette immediately: no push,
+image rebuild or application restart. What a pack contains is found by importing
+it once per distinct source and cached in `pack_inspections`. Nothing about packs
+is written to the filesystem, so a Builder restarted on a new pod has exactly the
+packs it had, and the Server reads pack code only from release snapshots. Pack
+files written by earlier versions under `~/daedalus-packs` are imported into the
+registry once by the migrate step. Every release snapshots the pack code it uses,
+so editing a pack later invalidates test evidence for its tools but never changes
+a published server, and a restored release runs the code it was published with. Anyone can view pack
 and tool source from the palette or the inspector. The in-app guide for writing
 packs is served at `/help/tool-packs.html` (source:
 [apps/builder-ui/public/help/tool-packs.html](apps/builder-ui/public/help/tool-packs.html))

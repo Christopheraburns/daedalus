@@ -57,8 +57,8 @@ def validate_body(schema, depth=0):
         validate_body(prop, depth + 1)
 
 
-def validate_python_tool(spec, connection, allowed):
-    info = packs.tool_info(spec["pack"], spec["function"])
+def validate_python_tool(spec, connection, allowed, resolver=None):
+    info = (resolver or packs.builtin_tool_info)(spec["pack"], spec["function"])
     if info["requires_connection"]:
         if connection is None:
             raise ValueError(f"{spec['pack']}.{spec['function']} requires a connection")
@@ -84,10 +84,10 @@ def validate_mcp_tool(spec, connection, allowed):
         raise ValueError("Add a description explaining when the tool should be used")
 
 
-def validate_tool(spec, connection, allowed):
+def validate_tool(spec, connection, allowed, resolver=None):
     ToolSpec.model_validate(spec)
     if spec.get("kind") == "python":
-        return validate_python_tool(spec, connection, allowed)
+        return validate_python_tool(spec, connection, allowed, resolver)
     if spec.get("kind") == "mcp":
         return validate_mcp_tool(spec, connection, allowed)
     validate_connection(connection, allowed)
@@ -130,28 +130,32 @@ def executor_schema(python_tools):
     return {"openapi": "3.0.3", "info": {"title": "Daedalus executor", "version": "1"}, "servers": [{"url": "/"}], "paths": paths}
 
 
-def fingerprint(spec, connection):
+def fingerprint(spec, connection, pack_digest=None):
     # enabled is release membership; toggling it does not change execution semantics.
     record = {"tool": {k: v for k, v in spec.items() if k != "enabled"}, "connection": connection}
     if spec.get("kind") == "python":
-        # Editing a project pack invalidates test evidence for the tools it serves.
-        record["pack_source"] = packs.source_digest(spec["pack"])
+        # Editing a project or seed pack invalidates test evidence for the tools it serves; built-ins are versioned by the image.
+        record["pack_source"] = pack_digest
     return digest(record)
 
 
-def compile_bundle(tools, connections, allowed):
+def compile_bundle(tools, connections, allowed, resolver=None, pack_sources=None):
+    """`resolver(pack, function)` describes Python tools (built-ins only by default); `pack_sources` holds the
+    source of every non-built-in pack that may be used, and the bundle snapshots the ones it needs."""
+    resolver = resolver or packs.builtin_tool_info
+    pack_sources = pack_sources or {}
     targets, names, python_tools = [], set(), []
     enabled = sorted((t for t in tools if t["spec"]["enabled"]), key=lambda t: t["spec"]["name"])
     for tool in (t for t in enabled if t["spec"].get("kind") == "python"):
         spec = tool["spec"]
         connection = connections[spec["connection_id"]] if spec.get("connection_id") else None
-        validate_tool(spec, connection, allowed)
+        validate_tool(spec, connection, allowed, resolver)
         if spec["name"] in names:
             raise ValueError("Tool names must be unique across the server")
         names.add(spec["name"])
         python_tools.append({"name": spec["name"], "description": spec["description"], "pack": spec["pack"], "function": spec["function"],
             "connection_id": spec.get("connection_id"), "config": spec.get("config", {}), "effect": spec["effect"],
-            "input_schema": packs.input_schema(packs.tool_info(spec["pack"], spec["function"])["parameters"])})
+            "input_schema": packs.input_schema(resolver(spec["pack"], spec["function"])["parameters"])})
     for tool in (t for t in enabled if t["spec"].get("kind") == "mcp"):
         spec = tool["spec"]
         validate_tool(spec, connections[spec["connection_id"]], allowed)
@@ -192,7 +196,11 @@ def compile_bundle(tools, connections, allowed):
                 raise ValueError(f"Tool names must be unique across the server; {name} is also served by the federated MCP server")
             names.add(name)
     used = sorted({t["spec"]["connection_id"] for t in enabled if t["spec"].get("connection_id")} | {e["connection_id"] for e in federated})
-    # Project pack code is snapshotted so a published server never changes when the file is edited later.
-    pack_sources = {name: packs.project_path(name).read_text() for name in sorted({t["pack"] for t in python_tools if t.get("kind", "python") == "python"}) if name not in packs.builtin_names()}
+    # Non-built-in pack code is snapshotted so a published server never changes when the pack is edited later.
+    needed = sorted({t["pack"] for t in python_tools if t.get("kind", "python") == "python"} - set(packs.builtin_names()))
+    missing = [name for name in needed if name not in pack_sources]
+    if missing:
+        raise ValueError(f"No source available for pack {', '.join(missing)}")
+    snapshot = {name: pack_sources[name] for name in needed}
     stored = {k: {kk: vv for kk, vv in connections[k].items() if not kk.startswith("_")} for k in used}
-    return {"schema_version": "factory/v1", "tools": enabled, "connections": stored, "targets": targets, "python_tools": python_tools, "pack_sources": pack_sources, "federated": federated}
+    return {"schema_version": "factory/v1", "tools": enabled, "connections": stored, "targets": targets, "python_tools": python_tools, "pack_sources": snapshot, "federated": federated}

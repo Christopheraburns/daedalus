@@ -105,6 +105,7 @@ def counters():
 # In-memory HDFS for tests and the playground. /webhdfs/v1 behaves like HttpFS (data
 # flows directly); /webhdfs-nn/v1 behaves like a NameNode (OPEN and CREATE answer with a
 # 307 redirect to the HttpFS path, as a real NameNode redirects to a DataNode).
+import hashlib
 import time
 from fastapi import Response
 from fastapi.responses import JSONResponse
@@ -122,7 +123,8 @@ fs = {"/": fs_entry("DIRECTORY"), "/data": fs_entry("DIRECTORY"), "/data/readme.
 def fs_status(entry, suffix):
     directory = entry["type"] == "DIRECTORY"
     return {"pathSuffix": suffix, "type": entry["type"], "length": 0 if directory else len(entry["content"]), "modificationTime": entry["mtime"], "accessTime": entry["mtime"],
-        "owner": entry["owner"], "group": "supergroup", "permission": "755" if directory else "644", "replication": 0 if directory else 1, "blockSize": 0 if directory else 134217728}
+        "owner": entry["owner"], "group": entry.get("group", "supergroup"), "permission": entry.get("permission", "755" if directory else "644"),
+        "replication": 0 if directory else entry.get("replication", 1), "blockSize": 0 if directory else 134217728}
 
 
 def remote_exception(status, exception, message):
@@ -211,4 +213,27 @@ async def webhdfs_operation(raw_path, request, redirects):
                     fs.setdefault(current, fs_entry("DIRECTORY", owner=user))
             fs[path] = fs_entry("FILE", body, owner=user)
             return Response(status_code=201, headers={"Location": str(request.url)})
+        if op in {"GETCONTENTSUMMARY", "GETFILECHECKSUM", "SETPERMISSION", "SETOWNER", "SETREPLICATION"} and entry is None:
+            return remote_exception(404, "FileNotFoundException", f"File does not exist: {path}")
+        if op == "GETCONTENTSUMMARY":
+            keys = [p for p in fs if p == path or p.startswith(path.rstrip("/") + "/")]
+            files = [k for k in keys if fs[k]["type"] == "FILE"]
+            length = sum(len(fs[k]["content"]) for k in files)
+            return {"ContentSummary": {"directoryCount": len(keys) - len(files), "fileCount": len(files), "length": length, "quota": -1, "spaceConsumed": length, "spaceQuota": -1}}
+        if op == "GETFILECHECKSUM":
+            if entry["type"] != "FILE":
+                return remote_exception(400, "IllegalArgumentException", f"Path is not a file: {path}")
+            return {"FileChecksum": {"algorithm": "MD5-of-0MD5-of-512CRC32C", "bytes": hashlib.md5(entry["content"]).hexdigest(), "length": 28}}
+        if op == "SETPERMISSION":
+            entry["permission"] = query.get("permission", "755")
+            return Response(status_code=200)
+        if op == "SETOWNER":
+            if query.get("owner"):
+                entry["owner"] = query["owner"]
+            if query.get("group"):
+                entry["group"] = query["group"]
+            return Response(status_code=200)
+        if op == "SETREPLICATION":
+            entry["replication"] = int(query.get("replication", 1))
+            return {"boolean": True}
         return remote_exception(400, "UnsupportedOperationException", f"Unsupported operation: {op}")

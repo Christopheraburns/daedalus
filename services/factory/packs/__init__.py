@@ -4,12 +4,14 @@ A pack is a module. Each tool is a function whose first parameter is a
 ToolContext; the remaining typed parameters become the MCP input schema and the
 docstring becomes the tool description shown to agents.
 
-Two origins exist. *Built-in* packs live in this package and ship with the
-runtime image. *Project* packs are files an administrator writes from the Builder
-into project storage (FACTORY_PACKS_DIR); they are read without a restart and
-snapshotted into each release so published servers never change underneath.
-Only the executor and the inspection subprocess import project code; the Builder
-process never does.
+Three origins exist. *Built-in* packs live in this package and ship with the
+runtime image. *Seed* packs ship in the code too (factory/seedpacks) but are inert
+until an administrator enables them. *Project* packs are written from the Builder
+and stored in the registry. The last two are read through factory.packstore; this
+module only knows how to import, describe and validate pack code. Every release
+snapshots the source of the packs it uses, so published servers never change
+underneath. Only the executor and the inspection subprocess import non-built-in
+code; the Builder process never does.
 """
 import hashlib
 import importlib
@@ -22,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,7 +42,7 @@ def hello(ctx: ToolContext, name: str) -> dict:
     """Greet someone by name. Explain here when an agent should use this tool."""
     return {"greeting": f"Hello, {name}", "user": ctx.caller.username}
 '''
-_inspections = {}
+SEED_DIR = Path(__file__).resolve().parents[1] / "seedpacks"
 
 
 @dataclass(frozen=True)
@@ -101,19 +104,38 @@ def builtin_names():
     return sorted(info.name for info in pkgutil.iter_modules(__path__) if PACK_NAME.match(info.name))
 
 
-def project_path(name):
-    if not PACK_NAME.match(name or ""):
-        raise ValueError("Pack names use lowercase letters, digits and underscores and start with a letter")
-    return project_dir() / f"{name}.py"
+def seed_names():
+    return sorted(p.stem for p in SEED_DIR.glob("*.py") if PACK_NAME.match(p.stem) and p.stem not in builtin_names())
 
 
-def load(name, search=None):
-    """Import a pack module. `search` lists directories holding project pack files;
-    only the executor and the inspection subprocess pass one."""
+def seed_source(name):
+    if name not in seed_names():
+        raise ValueError(f"Unknown seed pack: {name}")
+    return (SEED_DIR / f"{name}.py").read_text()
+
+
+def digest_of(source):
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def load_source(name, source):
+    """Import pack code held in memory (a release snapshot); nothing is written to disk."""
+    module = types.ModuleType(f"{__name__}.snapshot.{name}")
+    module.__file__ = f"<pack {name}>"
+    exec(compile(source, f"<pack {name}>", "exec"), module.__dict__)
+    return module
+
+
+def load(name, search=None, sources=None):
+    """Import a pack module. `sources` maps pack names to source text (a release's snapshot) and
+    `search` lists directories holding pack files; only the executor and the inspection subprocess
+    pass either."""
     if not PACK_NAME.match(name or ""):
         raise ValueError("Unknown tool pack")
     if name in builtin_names():
         return importlib.import_module(f"{__name__}.{name}")
+    if sources and name in sources:
+        return load_source(name, sources[name])
     for directory in search or []:
         path = Path(directory) / f"{name}.py"
         if path.is_file():
@@ -128,8 +150,8 @@ def tools(module):
     return {name: value for name, value in vars(module).items() if callable(value) and hasattr(value, "daedalus")}
 
 
-def resolve(pack, function, search=None):
-    available = tools(load(pack, search))
+def resolve(pack, function, search=None, sources=None):
+    available = tools(load(pack, search, sources))
     if function not in available:
         raise ValueError(f"Pack {pack} has no tool named {function}")
     return available[function]
@@ -159,49 +181,42 @@ def input_schema(parameters):
         "required": [p["name"] for p in parameters if p["required"]], "additionalProperties": False}
 
 
-def inspect_file(path):
-    """Describe a project pack by importing it in a short-lived subprocess with no
-    credentials, so a broken or hostile file cannot take the Builder down."""
-    path = Path(path)
-    key = (str(path), path.stat().st_mtime_ns)
-    if key in _inspections:
-        return _inspections[key]
+def inspect_source(name, source):
+    """Describe pack source by importing it in a short-lived subprocess with no credentials,
+    so a broken or hostile pack cannot take the Builder down. Callers cache the result by digest."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FACTORY_", "DATABASE_", "POSTGRES_"))}
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])  # the services directory
-    try:
-        completed = subprocess.run([sys.executable, "-m", "factory.packs", str(path)], capture_output=True, text=True, timeout=15, env=env)
-    except subprocess.TimeoutExpired:
-        return {"error": "Pack import did not finish within 15 seconds"}
+    with tempfile.TemporaryDirectory(prefix="factory-pack-") as directory:
+        path = Path(directory) / f"{name}.py"
+        path.write_text(source)
+        try:
+            completed = subprocess.run([sys.executable, "-m", "factory.packs", str(path)], capture_output=True, text=True, timeout=15, env=env)
+        except subprocess.TimeoutExpired:
+            return {"error": "Pack import did not finish within 15 seconds"}
     if completed.returncode:
-        result = {"error": (completed.stderr.strip().splitlines() or ["Pack import failed"])[-1][:600]}
-    else:
-        result = json.loads(completed.stdout)
-    _inspections.clear()
-    _inspections[key] = result
-    return result
+        return {"error": (completed.stderr.strip().splitlines() or ["Pack import failed"])[-1][:600]}
+    return json.loads(completed.stdout)
 
 
-def source_digest(name):
-    """Digest of a project pack's current source; built-in packs are versioned by the image."""
-    path = project_path(name)
-    return hashlib.sha256(path.read_bytes()).hexdigest() if name not in builtin_names() and path.is_file() else None
-
-
-def pack_info(name):
+def check_source(name, source):
+    """Validate pack code before it is stored; returns its inspection. Raises ValueError or SyntaxError."""
+    if not PACK_NAME.match(name or ""):
+        raise ValueError("Pack names use lowercase letters, digits and underscores and start with a letter")
     if name in builtin_names():
-        module = load(name)
-        return {"name": name, "origin": "builtin", "editable": False, "error": None, "source": inspect.getsource(module), **describe_module(module)}
-    path = project_path(name)
-    if not path.is_file():
-        raise ValueError(f"Unknown tool pack: {name}")
-    inspected = inspect_file(path)
-    return {"name": name, "origin": "project", "editable": True, "source": path.read_text(), "error": inspected.get("error"),
-        "description": inspected.get("description", ""), "protocol": inspected.get("protocol", "rest"), "tools": inspected.get("tools", []), "probe": inspected.get("probe")}
+        raise ValueError("Built-in packs are read-only; choose another name")
+    if len(source.encode()) > MAX_SOURCE:
+        raise ValueError("Pack source exceeds 64 KiB")
+    compile(source, f"{name}.py", "exec")  # SyntaxError surfaces with line numbers
+    inspected = inspect_source(name, source)
+    if inspected.get("error"):
+        raise ValueError(inspected["error"])
+    if not inspected["tools"]:
+        raise ValueError("Define at least one function decorated with @pack_tool")
+    return inspected
 
 
-def tool_info(pack, function):
-    info = pack_info(pack)
-    if info["error"]:
+def find_tool(info, pack, function):
+    if info.get("error"):
         raise ValueError(f"Pack {pack} cannot be loaded: {info['error']}")
     for tool in [*info["tools"], *([info["probe"]] if info.get("probe") else [])]:
         if tool["function"] == function:
@@ -209,47 +224,24 @@ def tool_info(pack, function):
     raise ValueError(f"Pack {pack} has no tool named {function}")
 
 
-def probes(protocol):
-    """Packs that can check a connection of this protocol: [(pack name, probe description)]."""
-    return [(entry["name"], entry["probe"]["description"]) for entry in catalog() if entry.get("probe") and entry["protocol"] == protocol and not entry.get("error")]
+def builtin_info(name):
+    if name not in builtin_names():
+        raise ValueError(f"Unknown tool pack: {name}")
+    module = load(name)
+    return {"name": name, "origin": "builtin", "editable": False, "error": None, "source": inspect.getsource(module), **describe_module(module)}
+
+
+def builtin_tool_info(pack, function):
+    """Tool lookup that knows built-in packs only; the Builder uses factory.packstore for the rest."""
+    return find_tool(builtin_info(pack), pack, function)
 
 
 def catalog(include_source=False):
-    names = builtin_names() + sorted(p.stem for p in project_dir().glob("*.py") if PACK_NAME.match(p.stem) and p.stem not in builtin_names())
-    entries = [pack_info(name) for name in names]
+    """The built-in packs. The Builder's full catalog (seeds and project packs) is factory.packstore.catalog."""
+    entries = [builtin_info(name) for name in builtin_names()]
     if not include_source:
         for entry in entries:
             entry.pop("source")
             for tool in [*entry["tools"], *([entry["probe"]] if entry.get("probe") else [])]:
                 tool.pop("source", None)
     return entries
-
-
-def save_project_pack(name, source):
-    """Validate and write a project pack atomically. Returns its catalog entry."""
-    path = project_path(name)
-    if name in builtin_names():
-        raise ValueError("Built-in packs are read-only; choose another name")
-    if len(source.encode()) > MAX_SOURCE:
-        raise ValueError("Pack source exceeds 64 KiB")
-    compile(source, path.name, "exec")  # SyntaxError surfaces with line numbers
-    with tempfile.TemporaryDirectory(prefix="factory-pack-") as directory:
-        candidate = Path(directory) / path.name
-        candidate.write_text(source)
-        inspected = inspect_file(candidate)
-    if inspected.get("error"):
-        raise ValueError(inspected["error"])
-    if not inspected["tools"]:
-        raise ValueError("Define at least one function decorated with @pack_tool")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staged = path.with_name(f".{name}.staging")  # never matches the *.py catalog glob
-    staged.write_text(source)
-    os.replace(staged, path)
-    return pack_info(name)
-
-
-def delete_project_pack(name):
-    path = project_path(name)
-    if name in builtin_names() or not path.is_file():
-        raise ValueError("Only project packs can be deleted")
-    path.unlink()

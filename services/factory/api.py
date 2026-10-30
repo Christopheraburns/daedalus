@@ -17,12 +17,15 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import func, select, text
 
 from .compiler import compile_bundle, digest, fingerprint, validate_connection, validate_tool
-from . import auth, mcp_client, packs
+from .deployment import MANAGED, provider_info
+from . import auth, mcp_client, packs, packstore
 from .packs import Caller
-from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, ServerImport, LayoutSpec, PackSource, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
-from .db import ApiOrigin, Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
+from .contracts import ApiOriginSpec, ConnectionSpec, DeploymentAction, ServerImport, LayoutSpec, PackEnabled, PackSource, PublishRequest, RollbackRequest, ServerSpec, TestRequest, ToolSpec
+from .db import DEFAULT_SERVER_NAME, ApiOrigin, Audit, Connection, Deployment, Layout, Release, Server, Tool, audit, database, new_id
 from .gateway import candidate, rpc
 from .settings import MODERN, ROOT, SERVER_ID, Settings
+
+STOPPED = {"stopped", "failed", "not_deployed", "ready_to_deploy"}  # deployment states in which nothing serves the server
 
 
 def create_app(settings=None):
@@ -119,8 +122,17 @@ def create_app(settings=None):
     def connection_spec(session, item):
         return get(session, Connection, item.connection_id).spec if item.connection_id else None
 
+    def tool_fingerprint(session, spec, connection):
+        """A tool's fingerprint includes the digest of the pack code it would run with, so editing a pack invalidates its tests."""
+        return fingerprint(spec, connection, packstore.pack_digest(session, settings, spec["pack"]) if spec.get("kind") == "python" else None)
+
+    def bundle_of(session, tools, connections, origins):
+        """compile_bundle with the Builder's view of packs: built-ins, enabled seeds and project packs."""
+        resolver, sources = packstore.view(session, settings)
+        return compile_bundle(tools, connections, origins, resolver=resolver, pack_sources=sources)
+
     def tool_json(session, item, server_id):
-        fp = fingerprint(item.spec, connection_spec(session, item))
+        fp = tool_fingerprint(session, item.spec, connection_spec(session, item))
         server = get(session, Server, selected(server_id))
         active = session.get(Release, server.active_release_id) if server.active_release_id else None
         published = bool(active and item.spec["enabled"] and any(t["id"] == item.id and t["fingerprint"] == fp for t in active.bundle["tools"]))
@@ -133,7 +145,7 @@ def create_app(settings=None):
         # Fingerprints use the connection's settings only, exactly as a test records them; the discovered-tools
         # annotation is compile input, and including it made tested MCP tools look untested.
         settings_only = {c.id: c.spec for c in rows}
-        tools = [{"id": t.id, "revision": t.revision, "spec": t.spec, "fingerprint": fingerprint(t.spec, settings_only.get(t.connection_id))} for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))]
+        tools = [{"id": t.id, "revision": t.revision, "spec": t.spec, "fingerprint": tool_fingerprint(session, t.spec, settings_only.get(t.connection_id))} for t in session.scalars(select(Tool).where(Tool.server_id == server_id).order_by(Tool.id))]
         return tools, connections
 
     def publish_checks(session, tools, server_id=None):
@@ -272,47 +284,60 @@ def create_app(settings=None):
     @app.delete("/api/servers/{id}", status_code=204)
     def delete_server(id: str, delete_application: bool = Query(default=True), if_match: str | None = Header(default=None), role=Depends(require())):
         """Delete a whole MCP server: its tools, connections, origins, layout, releases and deployment record.
-        Its Workbench application is deleted too when Daedalus manages it; any other process still serving it
-        blocks the deletion, because a Server whose server disappears would fail in a loop."""
+        What the provider created for it (container, Deployment, application) is deleted too when asked; otherwise
+        it must be stopped first, and any process still serving the server blocks the deletion, because a Server
+        whose server disappears would fail in a loop. The default workspace is emptied rather than removed:
+        requests without a server_id land there, so it must always exist."""
         from .deployment import deployment_action as apply_action
-        if id == SERVER_ID:
-            raise HTTPException(409, "The default server workspace cannot be deleted")
         with sessions.begin() as session:
             server = session.scalar(select(Server).where(Server.id == id).with_for_update())
             if server is None: raise HTTPException(404, "Record not found")
             revision(server.revision, if_match)
             deployment = session.scalar(select(Deployment).where(Deployment.server_id == id))
-            managed = deployment is not None and deployment.provider == "cloudera-ai" and deployment.application_id
+            managed = deployment is not None and deployment.provider in MANAGED and deployment.application_id
             if managed and delete_application:
                 try:
                     apply_action("delete", deployment_json(deployment), settings)
                 except Exception as exc:
-                    raise HTTPException(502, f"Could not delete the Workbench application {deployment.application_name}: {safe_error(exc)}")
+                    raise HTTPException(502, f"Could not delete {deployment.application_name} through the {deployment.provider} provider: {safe_error(exc)}")
             else:
                 owner = next((row for row in session.execute(OWNERS) if row.id == id), None)
                 heartbeat = (server.runtime or {}).get("heartbeat")
                 online = heartbeat and (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds() < 12
-                if owner or online or managed:
+                running = managed and deployment.status not in STOPPED
+                if owner or online or running:
                     who = owner.application_name if owner and owner.application_name else (deployment.application_name if managed else "a Server process")
-                    raise HTTPException(409, f"{who} is still serving this server; stop or delete its application first")
+                    raise HTTPException(409, f"{who} is still serving this server; stop or delete it first")
             counts = {"tools": 0, "connections": 0, "releases": 0}
             for model, key in ((Tool, "tools"), (Connection, "connections"), (Release, "releases"), (ApiOrigin, None), (Layout, None), (Deployment, None)):
                 for row in session.scalars(select(model).where(model.server_id == id)):
                     session.delete(row)
                     if key: counts[key] += 1
             session.flush()
-            audit(session, role, "server.delete", id, name=server.name, application_deleted=bool(managed and delete_application), **counts)
-            session.delete(server)
+            if id == SERVER_ID:
+                server.name = DEFAULT_SERVER_NAME
+                server.desired_release_id = server.active_release_id = None
+                server.runtime = {}
+                server.revision += 1
+                bootstrap(session, server.id)
+                audit(session, role, "server.empty", id, application_deleted=bool(managed and delete_application), **counts)
+            else:
+                audit(session, role, "server.delete", id, name=server.name, application_deleted=bool(managed and delete_application), **counts)
+                session.delete(server)
+
+    def bootstrap(session, server_id):
+        """The empty layout, deployment record and environment origins every server starts with."""
+        session.add(Layout(server_id=server_id)); session.add(Deployment(server_id=server_id, provider=settings.deployment_provider))
+        for origin in settings.allowed_origins:
+            if origin:
+                session.add(ApiOrigin(server_id=server_id, origin=origin, description="Environment bootstrap origin"))
 
     @app.post("/api/servers", status_code=201)
     def create_server(spec: ServerSpec, role=Depends(require("author"))):
         with sessions.begin() as session:
             server = Server(id=new_id(), name=spec.name)
             session.add(server); session.flush()
-            session.add(Layout(server_id=server.id)); session.add(Deployment(server_id=server.id, provider=settings.deployment_provider))
-            for origin in settings.allowed_origins:
-                if origin:
-                    session.add(ApiOrigin(server_id=server.id, origin=origin, description="Environment bootstrap origin"))
+            bootstrap(session, server.id)
             audit(session, role, "server.create", server.id, name=server.name)
             return {"id": server.id, "name": server.name, "revision": server.revision}
 
@@ -322,7 +347,7 @@ def create_app(settings=None):
         from .portability import export_server as build
         with sessions() as session:
             try:
-                document = build(session, selected(server_id))
+                document = build(session, selected(server_id), settings)
             except LookupError:
                 raise HTTPException(404, "Record not found")
         slug = re.sub(r"[^a-z0-9]+", "-", document["server"]["name"].lower()).strip("-") or "mcp-server"
@@ -366,42 +391,61 @@ def create_app(settings=None):
                 "active_tools": active.bundle["tools"] if active else [],
                 "releases": [release_json(r) for r in session.scalars(select(Release).where(Release.server_id == server_id).order_by(Release.created_at.desc()).limit(20))],
                 "deployment": deployment_json(deployment),
+                "deployment_provider": provider_info(settings),
                 "allowed_api_origins": policy_origins(session, server_id),
                 "limits": {"methods": ["GET", "POST"], "parameter_locations": ["path", "query"], "max_tools": 100, "kinds": ["http", "python"]}}
 
     @app.get("/api/packs")
     def list_packs(role=Depends(identity)):
-        return packs.catalog()
+        with sessions.begin() as session:
+            return packstore.catalog(session, settings)
+
+    @app.get("/api/packs/seeds")
+    def list_seed_packs(role=Depends(identity)):
+        with sessions.begin() as session:
+            return {"seeds": packstore.seeds(session, settings), "environment": settings.packs_enabled}
 
     @app.get("/api/packs/{name}")
     def get_pack(name: str, role=Depends(identity)):
-        try:
-            return packs.pack_info(name)
-        except ValueError as exc:
-            raise HTTPException(404, str(exc))
+        with sessions.begin() as session:
+            try:
+                return packstore.entry(session, settings, name, include_source=True)
+            except ValueError as exc:
+                raise HTTPException(404, str(exc))
 
-    # Project packs are code that runs inside Server applications; only administrators write them.
+    # Pack code runs inside Server applications; only administrators write it or switch seeds on.
     @app.put("/api/packs/{name}")
     def save_pack(name: str, request: PackSource, role=Depends(require())):
-        try:
-            info = packs.save_project_pack(name, request.source)
-        except (ValueError, SyntaxError) as exc:
-            raise HTTPException(422, str(exc))
         with sessions.begin() as session:
-            audit(session, role, "pack.save", f"pack:{name}", tools=[t["function"] for t in info["tools"]])
-        return info
+            try:
+                info = packstore.save(session, settings, name, request.source, role)
+            except (ValueError, SyntaxError) as exc:
+                raise HTTPException(422, str(exc))
+            audit(session, role, "pack.save", f"pack:{name}", tools=[t["function"] for t in info["tools"]], forked_from_seed=bool(info.get("forked_from_seed")))
+            return info
+
+    @app.put("/api/packs/{name}/enabled")
+    def set_pack_enabled(name: str, request: PackEnabled, role=Depends(require())):
+        with sessions.begin() as session:
+            if not request.enabled and session.scalar(select(Tool.id).where(Tool.spec["pack"].as_string() == name)):
+                raise HTTPException(409, "Remove the tools that use this pack before disabling it")
+            try:
+                packstore.set_enabled(session, settings, name, request.enabled, role)
+            except ValueError as exc:
+                raise HTTPException(404, str(exc))
+            return {"seeds": packstore.seeds(session, settings), "environment": settings.packs_enabled}
 
     @app.delete("/api/packs/{name}", status_code=204)
     def delete_pack(name: str, role=Depends(require())):
         with sessions.begin() as session:
-            if session.scalar(select(Tool.id).where(Tool.spec["pack"].as_string() == name)):
+            # Deleting a project copy of a seed falls back to the seed, so tools keep working; other packs must be unused.
+            if name not in packs.seed_names() and session.scalar(select(Tool.id).where(Tool.spec["pack"].as_string() == name)):
                 raise HTTPException(409, "Remove the tools that use this pack before deleting it")
             try:
-                packs.delete_project_pack(name)
+                packstore.delete(session, name)
             except ValueError as exc:
                 raise HTTPException(404, str(exc))
             audit(session, role, "pack.delete", f"pack:{name}")
-
     @app.get("/api/policies/origins")
     def list_origins(server_id: str | None = Query(default=None), role=Depends(identity)):
         with sessions() as session:
@@ -480,7 +524,7 @@ def create_app(settings=None):
         if connection and connection.server_id != server_id: raise HTTPException(422, "Connection belongs to another server")
         if spec.kind == "python":
             try:
-                validate_tool(spec.model_dump(), connection.spec if connection else None, policy_origins(session, server_id))
+                validate_tool(spec.model_dump(), connection.spec if connection else None, policy_origins(session, server_id), packstore.resolver(session, settings))
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
         return connection
@@ -498,7 +542,7 @@ def create_app(settings=None):
                 raise HTTPException(422, f"{connection.spec['name']} has no discovered tool named {spec.upstream_tool}; check the connection again")
             data["input_schema"], data["wrap_body"] = found["input_schema"], bool(found.get("wrap_body"))
             try:
-                validate_tool(data, connection.spec, policy_origins(session, server_id))
+                validate_tool(data, connection.spec, policy_origins(session, server_id), packstore.resolver(session, settings))
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
         return data
@@ -563,6 +607,9 @@ def create_app(settings=None):
                 if item.server_id != server_id: raise HTTPException(404, "Record not found")
                 revision(item.revision, if_match)
                 spec, origins = item.spec, policy_origins(session, server_id)
+                # Everything about packs is read here; nothing below may touch the session once this block ends.
+                pack_resolver, pack_sources = packstore.view(session, settings)
+                probe_packs = packstore.probes(session, settings, spec.get("protocol", "rest"))
             started = time.monotonic()
             protocol = spec.get("protocol", "rest")
             discovered = None
@@ -579,12 +626,12 @@ def create_app(settings=None):
                         if not summary["federation_ok"]:
                             summary["message"] += "; it cannot be federated (no server/discover on protocol " + MODERN + "), add its tools individually instead"
                 else:
-                    available = packs.probes(protocol)
+                    available = probe_packs
                     if not available:
                         raise HTTPException(422, f"No installed pack can check a {protocol} connection")
                     pack = available[0][0]
                     probe = {"id": "probe", "revision": 1, "fingerprint": "", "spec": ToolSpec(name="probe", description=available[0][1], kind="python", pack=pack, function="probe", connection_id=id).model_dump()}
-                    bundle = compile_bundle([probe], {id: spec}, origins)
+                    bundle = compile_bundle([probe], {id: spec}, origins, resolver=pack_resolver, pack_sources=pack_sources)
                     with candidate(bundle, settings) as (url, token, _):
                         result = rpc(url, token, "tools/call", {"name": "probe", "arguments": {}})
                     payload = result.get("structuredContent") or {}
@@ -647,10 +694,10 @@ def create_app(settings=None):
             revision(tool.revision, if_match)
             conn = connection_spec(session, tool)
             try:
-                validate_tool(tool.spec, conn, policy_origins(session, server_id))
+                validate_tool(tool.spec, conn, policy_origins(session, server_id), packstore.resolver(session, settings))
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
-            tool.validated_fingerprint = fingerprint(tool.spec, conn)
+            tool.validated_fingerprint = tool_fingerprint(session, tool.spec, conn)
             audit(session, role, "tool.validate", id)
             profile = f"Python pack {tool.spec['pack']}.{tool.spec['function']} served by the executor" if tool.spec.get("kind") == "python" else "OpenAPI 3.0.3: scalar path/query parameters and JSON object bodies"
             return {"valid": True, "profile": profile}
@@ -665,13 +712,13 @@ def create_app(settings=None):
                 if tool.server_id != server_id: raise HTTPException(404, "Record not found")
                 revision(tool.revision, if_match)
                 conn = connection_spec(session, tool)
-                fp = fingerprint(tool.spec, conn)
+                fp = tool_fingerprint(session, tool.spec, conn)
                 if tool.spec["effect"] == "write" and not request.confirm_write:
                     raise HTTPException(422, "Confirm the live write test explicitly")
                 tool_data = {"id": tool.id, "revision": tool.revision, "spec": {**tool.spec, "enabled": True}, "fingerprint": fp}
                 # A tool test covers this tool only; a federated connection's whole server is not part of it.
                 isolated = {**conn, "federate": False} if conn and conn.get("protocol") == "mcp" else conn
-                bundle = compile_bundle([tool_data], {tool.connection_id: isolated} if conn else {}, policy_origins(session, server_id))
+                bundle = bundle_of(session, [tool_data], {tool.connection_id: isolated} if conn else {}, policy_origins(session, server_id))
             started = time.monotonic()
             log = []
 
@@ -713,7 +760,7 @@ def create_app(settings=None):
                 server_lock(session, server_id)
                 current = get(session, Tool, id)
                 if current.server_id != server_id: raise HTTPException(404, "Record not found")
-                if fingerprint(current.spec, connection_spec(session, current)) != fp:
+                if tool_fingerprint(session, current.spec, connection_spec(session, current)) != fp:
                     raise HTTPException(409, "Definition changed during testing; result cannot qualify this draft")
                 current.tested_fingerprint = fp if outcome["success"] else None
                 if outcome["success"]:
@@ -741,7 +788,7 @@ def create_app(settings=None):
             problems = publish_checks(session, tools, server_id)
             federated_after = []
             try:
-                federated_after = federated_names(compile_bundle(tools, connections, policy_origins(session, server_id)))
+                federated_after = federated_names(bundle_of(session, tools, connections, policy_origins(session, server_id)))
             except ValueError as exc:
                 problems.append(str(exc))
             active = session.get(Release, server.active_release_id) if server.active_release_id else None
@@ -754,7 +801,7 @@ def create_app(settings=None):
 
     def activate_unattended(session, server, actor):
         """Activate the desired release when no Server will: none is online for this server, or the one online is
-        pinned to its deployed release (Workbench deployments are; Deploy rolls the new release out). Every release
+        pinned to its deployed release (deployed Servers are; Deploy rolls the new release out). Every release
         passed the full candidate check (gateway, executor, catalog) before it was recorded, so only the hot swap
         into a running gateway is skipped. Without this a new server could never get its first active release."""
         desired = session.get(Release, server.desired_release_id) if server.desired_release_id else None
@@ -809,7 +856,7 @@ def create_app(settings=None):
             if problems:
                 raise HTTPException(422, "; ".join(problems))
             try:
-                bundle = compile_bundle(tools, connections, policy_origins(session, server_id))
+                bundle = bundle_of(session, tools, connections, policy_origins(session, server_id))
             except ValueError as exc:
                 raise HTTPException(422, str(exc))
         return enqueue(bundle, request.revision, role, server_id)
@@ -826,7 +873,9 @@ def create_app(settings=None):
                 raise HTTPException(422, "Stored release checksum mismatch")
             discovered = {e["connection_id"]: e["tools"] for e in release.bundle.get("federated", [])}
             connections = {cid: {**spec, "_discovered": discovered[cid]} if cid in discovered else spec for cid, spec in release.bundle["connections"].items()}
-            bundle = compile_bundle(release.bundle["tools"], connections, policy_origins(session, server_id))
+            # A restored release runs the pack code it was published with, not the packs as they are now.
+            snapshot_sources = release.bundle.get("pack_sources", {})
+            bundle = compile_bundle(release.bundle["tools"], connections, policy_origins(session, server_id), resolver=packstore.resolver_from_sources(session, snapshot_sources), pack_sources=snapshot_sources)
         return enqueue(bundle, request.revision, role, server_id)
 
     @app.post("/api/deployments")
@@ -838,8 +887,8 @@ def create_app(settings=None):
             deployment = session.scalar(select(Deployment).where(Deployment.server_id == server_id).with_for_update())
             if not server.active_release_id: raise HTTPException(422, "Publish and activate a release before deployment")
             release = get(session, Release, server.active_release_id)
-            # The application keeps its name once created (Workbench ties the subdomain to it); before that, the
-            # publisher may choose one. Names must not collide with another server's application.
+            # The deployment keeps its name once created (providers tie things to it: a container name, a Deployment, a subdomain); before
+            # that, the publisher may choose one. Names must not collide with another server's application.
             name = deployment.application_name if deployment.application_id else (request.application_name or deployment.application_name)
             if request.application_name and deployment.application_id and request.application_name != deployment.application_name:
                 raise HTTPException(409, "This server's application already exists; delete it to deploy under another name")
@@ -875,7 +924,7 @@ def create_app(settings=None):
         with sessions.begin() as session:
             deployment = session.scalar(select(Deployment).where(Deployment.server_id == server_id).with_for_update())
             if deployment is None: raise HTTPException(404, "Record not found")
-            if deployment.provider == "manual" or not deployment.application_id:
+            if deployment.provider not in MANAGED or not deployment.application_id:
                 return deployment_json(deployment)
             try:
                 result = apply_action("refresh", deployment_json(deployment), settings)

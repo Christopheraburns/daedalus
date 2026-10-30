@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from factory import deployment
+from factory.providers import cloudera_ai
 from factory.db import Release, Server
 from factory.settings import SERVER_ID
 
@@ -68,12 +69,12 @@ class FakeWorkbench:
 @pytest.fixture
 def workbench(monkeypatch):
     fake = FakeWorkbench()
-    monkeypatch.setattr(deployment, "TRANSPORT", httpx.MockTransport(fake.handler))
+    monkeypatch.setattr(cloudera_ai, "TRANSPORT", httpx.MockTransport(fake.handler))
     monkeypatch.setenv("FACTORY_DEPLOYMENT_PROVIDER", "cloudera-ai")
-    monkeypatch.setenv("CDSW_DOMAIN", "ml-abc.example.cloudera.site")
-    monkeypatch.setenv("CDSW_APIV2_KEY", "api-key-123")
-    monkeypatch.setenv("CDSW_PROJECT_ID", "proj-1")
-    monkeypatch.setenv("MCP_FACTORY_RUNTIME_IMAGE", "registry/mcp-factory-runtime:0.1.2")
+    monkeypatch.setenv("FACTORY_CAI_DOMAIN", "ml-abc.example.cloudera.site")
+    monkeypatch.setenv("FACTORY_CAI_API_KEY", "api-key-123")
+    monkeypatch.setenv("FACTORY_CAI_PROJECT_ID", "proj-1")
+    monkeypatch.setenv("FACTORY_CAI_RUNTIME_IDENTIFIER", "registry/mcp-factory-runtime:0.1.2")
     monkeypatch.setenv("FACTORY_CAI_BYPASS_AUTH", "true")
     return fake
 
@@ -134,13 +135,13 @@ def test_cloudera_ai_provider_creates_updates_and_manages_the_application(regist
 
 def test_cloudera_ai_provider_reports_configuration_and_api_errors(registry, workbench, monkeypatch):
     _, sessions, _ = registry
-    monkeypatch.setenv("CDSW_APIV2_KEY", "wrong-key")
+    monkeypatch.setenv("FACTORY_CAI_API_KEY", "wrong-key")
     client = builder(registry)
     activate_release(sessions)
     revision = client.get("/api/workspace").json()["server"]["revision"]
     failed = client.post("/api/deployments", json={"revision": revision}).json()
     assert failed["status"] == "failed" and "401" in failed["message"] and "wrong-key" not in failed["message"]
-    monkeypatch.delenv("CDSW_PROJECT_ID")
+    monkeypatch.delenv("FACTORY_CAI_PROJECT_ID")
     client = builder(registry)
     revision = client.get("/api/workspace").json()["server"]["revision"]
     assert "FACTORY_CAI_PROJECT_ID" in client.post("/api/deployments", json={"revision": revision}).json()["message"]
@@ -148,7 +149,7 @@ def test_cloudera_ai_provider_reports_configuration_and_api_errors(registry, wor
 
 def test_cloudera_ai_provider_uses_the_builders_own_runtime_from_the_catalog(registry, workbench, monkeypatch):
     _, sessions, _ = registry
-    monkeypatch.delenv("MCP_FACTORY_RUNTIME_IMAGE")
+    monkeypatch.delenv("FACTORY_CAI_RUNTIME_IDENTIFIER")
     for key, value in {"EDITION": "MCP Factory Development", "FULL_VERSION": "0.1.2", "EDITOR": "PBJ Workbench", "KERNEL": "Python 3.12"}.items():
         monkeypatch.setenv(f"ML_RUNTIME_{key}", value)
     client = builder(registry)
@@ -184,9 +185,9 @@ def test_live_status_follows_the_application_without_a_revision(registry, workbe
 
 def test_the_server_script_is_a_path_from_the_project_root(monkeypatch):
     from factory.settings import Settings
-    monkeypatch.setenv("CDSW_HOME", "/")  # in the test container the repository is /workspace, so "workspace/" is its folder
+    monkeypatch.setenv("FACTORY_CAI_HOME", "/")  # in the test container the repository is /workspace, so "workspace/" is its folder
     assert deployment.server_script(Settings()) == "workspace/mcp_server_app.py"
-    monkeypatch.setenv("CDSW_HOME", "/workspace")
+    monkeypatch.setenv("FACTORY_CAI_HOME", "/workspace")
     assert deployment.server_script(Settings()) == "mcp_server_app.py"
     monkeypatch.setenv("FACTORY_CAI_SCRIPT", "custom/start.py")
     assert deployment.server_script(Settings()) == "custom/start.py"
@@ -221,7 +222,7 @@ def test_the_first_deploy_chooses_the_name_and_later_deploys_follow_the_applicat
     # A failed deploy keeps the application it knows about.
     original = workbench.handler
     workbench.handler = lambda request: httpx.Response(500, json={"error": "boom"}) if request.method == "PATCH" else original(request)
-    deployment.TRANSPORT = httpx.MockTransport(workbench.handler)
+    cloudera_ai.TRANSPORT = httpx.MockTransport(workbench.handler)
     failed = client.post("/api/deployments", json={"revision": rev()}).json()
     # Workbench is the truth for the application's name: the rename there was kept, and survives the failure.
     assert failed["status"] == "failed" and failed["application_id"] == "app-1" and failed["application_name"] == "renamed-in-workbench"
@@ -256,6 +257,18 @@ def test_deleting_a_deployed_server_deletes_its_workbench_application(registry, 
     revision = lambda: next(s for s in client.get("/api/servers").json() if s["id"] == other["id"])["revision"]
     workbench_name = client.post(f"/api/deployments?server_id={other['id']}", json={"revision": revision(), "application_name": "short-lived"}).json()
     assert workbench_name["application_id"] in workbench.applications
-    assert client.delete(f"/api/servers/{other['id']}?delete_application=false", headers={"If-Match": str(revision())}).status_code == 409  # its application would be orphaned
-    assert client.delete(f"/api/servers/{other['id']}", headers={"If-Match": str(revision())}).status_code == 204
-    assert workbench.applications == {}
+    refused = client.delete(f"/api/servers/{other['id']}?delete_application=false", headers={"If-Match": str(revision())})
+    assert refused.status_code == 409 and refused.json()["detail"] == "short-lived is still serving this server; stop or delete it first"  # it is running
+    assert client.post(f"/api/deployments/stop?server_id={other['id']}", json={"revision": revision()}).json()["status"] == "stopped"
+    assert client.delete(f"/api/servers/{other['id']}?delete_application=false", headers={"If-Match": str(revision())}).status_code == 204  # stopped: the application may stay
+    assert workbench_name["application_id"] in workbench.applications
+    kept = client.post("/api/servers", json={"name": "Kept"}).json()
+    with sessions.begin() as session:
+        server = session.get(Server, kept["id"])
+        release = Release(server_id=kept["id"], bundle={"tools": [], "connections": {}, "targets": [], "python_tools": [], "pack_sources": {}}, checksum="1" * 64, status="active", created_by="test")
+        session.add(release); session.flush(); server.active_release_id = release.id; server.revision += 1
+    revision = lambda: next(s for s in client.get("/api/servers").json() if s["id"] == kept["id"])["revision"]
+    created = client.post(f"/api/deployments?server_id={kept['id']}", json={"revision": revision(), "application_name": "kept"}).json()
+    assert created["application_id"] in workbench.applications, created
+    assert client.delete(f"/api/servers/{kept['id']}", headers={"If-Match": str(revision())}).status_code == 204
+    assert created["application_id"] not in workbench.applications

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -17,10 +17,13 @@ class Base(DeclarativeBase):
     pass
 
 
+DEFAULT_SERVER_NAME = "My MCP server"
+
+
 class Server(Base):
     __tablename__ = "servers"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    name: Mapped[str] = mapped_column(String(80), default="My MCP server")
+    name: Mapped[str] = mapped_column(String(80), default=DEFAULT_SERVER_NAME)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     desired_release_id: Mapped[str | None] = mapped_column(String(36))
     active_release_id: Mapped[str | None] = mapped_column(String(36))
@@ -105,6 +108,35 @@ class Deployment(Base):
     message: Mapped[str | None] = mapped_column(Text)
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class Pack(Base):
+    """A project pack: code written from the Builder (or a seed pack an administrator edited, which then shadows the seed)."""
+    __tablename__ = "packs"
+    name: Mapped[str] = mapped_column(String(30), primary_key=True)
+    source: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))
+    forked_from_digest: Mapped[str | None] = mapped_column(String(64))  # the seed's digest when this copy was made
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by: Mapped[str] = mapped_column(String(80), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class PackSetting(Base):
+    """Whether a seed pack is switched on; absent rows fall back to FACTORY_PACKS_ENABLED."""
+    __tablename__ = "pack_settings"
+    name: Mapped[str] = mapped_column(String(30), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_by: Mapped[str] = mapped_column(String(80), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class PackInspection(Base):
+    """What importing a pack's source found (tools, parameters, docstrings), cached by source digest."""
+    __tablename__ = "pack_inspections"
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    result: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 def database(url, application_name=None):

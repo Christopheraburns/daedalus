@@ -42,6 +42,10 @@ class PackSource(Contract):
     source: str = Field(min_length=1, max_length=65536)
 
 
+class PackEnabled(Contract):
+    enabled: bool
+
+
 class OpenAPIImportRequest(Contract):
     url: str = Field(min_length=1, max_length=500)
 
@@ -52,7 +56,7 @@ class DeploymentRequest(Contract):
 
 class DeploymentAction(Contract):
     revision: int = Field(ge=1)
-    # Only for the first deploy: the Workbench application name, which is also its subdomain.
+    # Only for the first deploy: the name of what the provider creates (container, Deployment or application; also its subdomain on Workbench).
     application_name: str = Field(default="", max_length=63)
 
 

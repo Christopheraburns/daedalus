@@ -48,8 +48,7 @@ services:
     <<: *runtime
     volumes:
       - .:/workspace:ro
-      # Project tool packs written from the Builder; Workbench shares /home/cdsw between applications.
-      # A bind mount keeps the directory writable by the cdsw user, unlike a root-initialised named volume.
+      # Pack files written by earlier versions; the migrate step imports them into the registry once.
       - ${FACTORY_LOCAL_PACKS_DIR:-./.project-packs}:/home/cdsw/daedalus-packs
     environment:
       <<: *environment
@@ -76,9 +75,6 @@ services:
     <<: *runtime
     volumes:
       - .:/workspace:ro
-      # Project tool packs written from the Builder; Workbench shares /home/cdsw between applications.
-      # A bind mount keeps the directory writable by the cdsw user, unlike a root-initialised named volume.
-      - ${FACTORY_LOCAL_PACKS_DIR:-./.project-packs}:/home/cdsw/daedalus-packs
     environment:
       <<: *environment
       FACTORY_GATEWAY_BIND: "0.0.0.0"

@@ -1,0 +1,89 @@
+# Reference deployment of Daedalus as plain containers: a registry, the Builder, and one MCP Server.
+# From the repository root:
+#   docker compose -f deploy/container/compose.yaml --env-file .env up -d --build
+# Then open http://localhost:${DAEDALUS_BUILDER_PORT:-8000} and sign in with a token from .env.
+# compose.yaml at the repository root is the development stack (mounted source, mock APIs); this one is for running.
+name: daedalus
+x-daedalus: &daedalus
+  build:
+    context: ../..
+    dockerfile: deploy/container/Dockerfile
+    args:
+      GIT_REVISION: ${GIT_REVISION:-unknown}
+  image: ${DAEDALUS_IMAGE:-daedalus:local}
+  restart: unless-stopped
+  environment: &daedalus-env
+    DATABASE_URL: postgresql+psycopg://factory:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/factory
+    FACTORY_AUTH_MODE: ${FACTORY_AUTH_MODE:-development-token}
+    FACTORY_MCP_TOKEN: ${FACTORY_MCP_TOKEN:?Set FACTORY_MCP_TOKEN}
+    FACTORY_ALLOWED_API_ORIGINS: ${FACTORY_ALLOWED_API_ORIGINS:-}
+    FACTORY_PACKS_ENABLED: ${FACTORY_PACKS_ENABLED:-}
+    FACTORY_PUBLIC_MCP_URL: ${FACTORY_PUBLIC_MCP_URL:-http://localhost:${DAEDALUS_SERVER_PORT:-8081}/mcp}
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: factory
+      POSTGRES_DB: factory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    command: ["postgres", "-c", "tcp_keepalives_idle=30", "-c", "tcp_keepalives_interval=10", "-c", "tcp_keepalives_count=3"]
+    volumes:
+      - registry:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory -d factory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  builder:
+    <<: *daedalus
+    command: ["builder"]
+    environment:
+      <<: *daedalus-env
+      FACTORY_ADMINISTRATOR_TOKEN: ${FACTORY_ADMINISTRATOR_TOKEN:-}
+      FACTORY_AUTHOR_TOKEN: ${FACTORY_AUTHOR_TOKEN:-}
+      FACTORY_PUBLISHER_TOKEN: ${FACTORY_PUBLISHER_TOKEN:-}
+      FACTORY_VIEWER_TOKEN: ${FACTORY_VIEWER_TOKEN:-}
+      FACTORY_BROWSER_ORIGINS: ${FACTORY_BROWSER_ORIGINS:-http://localhost:${DAEDALUS_BUILDER_PORT:-8000},http://127.0.0.1:${DAEDALUS_BUILDER_PORT:-8000}}
+      FACTORY_DEPLOYMENT_PROVIDER: ${FACTORY_DEPLOYMENT_PROVIDER:-manual}
+      # With FACTORY_DEPLOYMENT_PROVIDER=docker, Deploy starts one Server container per MCP server on this network.
+      FACTORY_SERVER_IMAGE: ${DAEDALUS_IMAGE:-daedalus:local}
+      FACTORY_DOCKER_NETWORK: ${FACTORY_DOCKER_NETWORK:-daedalus_default}
+      FACTORY_DOCKER_HOST_NAME: ${FACTORY_DOCKER_HOST_NAME:-localhost}
+    volumes:
+      # Needed only by the docker provider; remove it for manual mode.
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    # The Builder runs unprivileged (uid 10001). On a Linux host the socket is root:docker, so granting its group is
+    # enough: DOCKER_GID=$(stat -c %g /var/run/docker.sock). Docker Desktop (Mac/Windows) mounts it root:root 755, which
+    # only root may use: set DAEDALUS_BUILDER_USER=0 there, or leave the provider on manual.
+    user: "${DAEDALUS_BUILDER_USER:-10001}"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    ports:
+      - "${DAEDALUS_BUILDER_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # One container per MCP server. Copy this service and change FACTORY_SERVER_ID to serve another.
+  server:
+    <<: *daedalus
+    command: ["server"]
+    environment:
+      <<: *daedalus-env
+      FACTORY_SERVER_ID: ${FACTORY_SERVER_ID:-85d30f87-b285-4d17-a89e-84bac6ac37bc}
+    ports:
+      - "${DAEDALUS_SERVER_PORT:-8081}:8081"
+    depends_on:
+      builder:
+        condition: service_healthy
+
+volumes:
+  registry:

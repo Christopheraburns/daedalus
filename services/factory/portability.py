@@ -11,16 +11,16 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from . import packs
+from . import packs, packstore
 from .compiler import validate_connection
 from .contracts import ConnectionSpec, ToolSpec
-from .db import ApiOrigin, Connection, Deployment, Layout, Server, Tool, audit, new_id
+from .db import ApiOrigin, Connection, Deployment, Layout, Pack, Server, Tool, audit, new_id
 
 FORMAT = "daedalus-server/v1"
 SECRET_FIELDS = ("secret_ref", "keytab_ref")
 
 
-def export_server(session, server_id):
+def export_server(session, server_id, settings):
     server = session.get(Server, server_id)
     if server is None:
         raise LookupError("Record not found")
@@ -33,9 +33,10 @@ def export_server(session, server_id):
     used_packs = sorted({t.spec["pack"] for t in tools if t.spec.get("kind") == "python" and t.spec.get("pack") not in packs.builtin_names()})
     pack_sources = {}
     for name in used_packs:
-        path = packs.project_path(name)
-        if path.is_file():
-            pack_sources[name] = path.read_text()
+        try:
+            pack_sources[name] = packstore.source_of(session, settings, name)
+        except ValueError:
+            pass  # the pack no longer exists here; the importing side reports it as missing
     secrets = sorted({c.spec[field] for c in connections for field in SECRET_FIELDS if c.spec.get(field)})
     return {
         "format": FORMAT,
@@ -69,29 +70,40 @@ def check_document(document):
             raise ValueError(f"Tool {tool['spec'].get('name')} refers to a connection that is not in the export")
 
 
-def pack_conflicts(document):
-    """Project packs in the export that already exist here with different code."""
+def existing_source(session, name):
+    """The code this installation already has under a pack name: a project pack, else a seed, else None."""
+    row = session.get(Pack, name)
+    if row is not None:
+        return row.source
+    return packs.seed_source(name) if name in packs.seed_names() else None
+
+
+def pack_conflicts(session, document):
+    """Packs in the export that already exist here with different code."""
     conflicts = []
     for name, source in document["packs"].items():
         if name in packs.builtin_names():
             raise ValueError(f"The export contains a project pack named {name}, which is a built-in pack here")
-        path = packs.project_path(name)
-        if path.is_file() and path.read_text() != source:
+        existing = existing_source(session, name)
+        if existing is not None and existing != source:
             conflicts.append(name)
     return conflicts
 
 
 def import_server(session, document, name, replace_packs, actor, settings, deployment_provider):
     check_document(document)
-    conflicts = pack_conflicts(document)
+    conflicts = pack_conflicts(session, document)
     if conflicts and not replace_packs:
         raise FileExistsError(", ".join(conflicts))
     written = []
     for pack_name, source in document["packs"].items():
-        path = packs.project_path(pack_name)
-        if not path.is_file() or path.read_text() != source:
-            packs.save_project_pack(pack_name, source)  # validated in isolation, like a save from the editor
-            written.append(pack_name)
+        if existing_source(session, pack_name) == source:
+            if session.get(Pack, pack_name) is None and not packstore.seed_enabled(session, settings, pack_name):
+                packstore.set_enabled(session, settings, pack_name, True, actor)  # the export relies on this seed
+            continue
+        packstore.save(session, settings, pack_name, source, actor)  # validated in isolation, like a save from the editor
+        written.append(pack_name)
+    resolver = packstore.resolver(session, settings)
     server = Server(id=new_id(), name=(name or document["server"]["name"])[:80])
     session.add(server)
     session.flush()
@@ -115,7 +127,7 @@ def import_server(session, document, name, replace_packs, actor, settings, deplo
         spec["connection_id"] = ids[spec["connection_id"]] if spec.get("connection_id") else None
         spec = ToolSpec.model_validate(spec).model_dump()
         if spec["kind"] == "python":
-            packs.tool_info(spec["pack"], spec["function"])  # the pack and function exist here
+            resolver(spec["pack"], spec["function"])  # the pack and function exist here
         tool = Tool(server_id=server.id, spec=spec, connection_id=spec["connection_id"])
         session.add(tool)
         session.flush()

@@ -1,4 +1,5 @@
-"""Which code a process is running: the Git commit of the checkout it was started from."""
+"""Which code a process is running: FACTORY_CODE_REVISION when an image baked it in, else the Git commit of the checkout."""
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,4 +23,4 @@ def code_revision(root=ROOT):
     return "unknown"
 
 
-REVISION = code_revision()
+REVISION = os.getenv("FACTORY_CODE_REVISION") or code_revision()

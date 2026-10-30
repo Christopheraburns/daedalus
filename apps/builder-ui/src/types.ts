@@ -2,7 +2,9 @@ export type Parameter = { name: string; location: 'path' | 'query'; type: 'strin
 export type ToolKind = 'http' | 'python' | 'mcp';
 export type ToolSpec = { name: string; description: string; kind?: ToolKind; connection_id: string | null; method: 'GET' | 'POST'; path: string; parameters: Parameter[]; body_schema: Record<string, unknown> | null; pack?: string; function?: string; config?: Record<string, unknown>; upstream_tool?: string; input_schema?: JsonSchema; wrap_body?: boolean; effect: 'read' | 'write'; enabled: boolean };
 export type PackTool = { function: string; description: string; effect: 'read' | 'write'; requires_connection: boolean; parameters: { name: string; type: string; required: boolean }[]; source?: string };
-export type Pack = { name: string; description: string; origin: 'builtin' | 'project'; editable: boolean; error: string | null; protocol: Protocol; tools: PackTool[]; source?: string };
+export type Pack = { name: string; description: string; origin: 'builtin' | 'seed' | 'project'; editable: boolean; error: string | null; protocol: Protocol; tools: PackTool[]; source?: string; enabled?: boolean; revision?: number; forked_from_seed?: boolean; seed_updated?: boolean };
+export type SeedPack = { name: string; enabled: boolean; configured_by: 'default' | 'environment' | 'setting'; description: string; protocol: Protocol; error: string | null; tools: number; shadowed: boolean; seed_updated: boolean };
+export type SeedCatalog = { seeds: SeedPack[]; environment: string[] };
 /** What the canvas and lists show for a tool: method and path for HTTP tools, pack.function for Python tools. */
 export function toolLabel(tool: ToolSpec): { method: string; subtitle: string } {
   if (tool.kind === 'mcp') return { method: 'MCP', subtitle: tool.upstream_tool ?? '' };
@@ -22,6 +24,7 @@ export type ServerSummary = { id: string; name: string; revision: number; active
   owner?: { process: string | null; address: string | null; since: string | null } | null;
   contender?: { host: string | null; revision: string | null; owner: string | null; at: string } | null;
   runtime?: { online: boolean; ready: boolean; heartbeat_age: number | null; host: string | null; revision: string | null; effective_release_id: string | null } };
+export type ProviderInfo = { name: string; label: string; manages: boolean; target: 'none' | 'container' | 'deployment' | 'application'; endpoint_pattern: string | null; name_fixed_after_create: boolean; configuration_error: string | null };
 export type Workspace = {
   identity: { role: string; mode: string };
   server: { id: string; name: string; revision: number; is_default?: boolean; active_release_id: string | null; desired_release_id: string | null; mcp_url: string; runtime: { online: boolean; ready?: boolean; gateway_pid?: number; gateway_started_at?: string; effective_release_id?: string | null; last_error?: string | null; revision?: string; host?: string } };
@@ -30,6 +33,7 @@ export type Workspace = {
   active_tools: { id: string; revision: number; spec: ToolSpec; fingerprint: string }[];
   releases: Release[]; allowed_api_origins: string[];
   deployment: Deployment;
+  deployment_provider: ProviderInfo;
 };
 export type Preview = { revision: number; added: string[]; changed: string[]; removed: string[]; problems: string[] };
 export type OpenAPIOperation = { method: string; path: string; name: string; description: string; parameters: Parameter[]; body_schema: Record<string, unknown> | null; effect: 'read' | 'write'; supported?: boolean };

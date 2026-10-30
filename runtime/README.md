@@ -1,5 +1,7 @@
 # MCP Factory development runtime
 
+> This is the **Cloudera AI Workbench** runtime: a custom ML Runtime that Workbench sessions and applications run in. To run Daedalus as ordinary containers anywhere else, use [deploy/container/Dockerfile](../deploy/container/Dockerfile) instead.
+
 This image supplies the development environment described in section 4 of
 [the developer plan](../MCP_Factory_Developer_Plan.md). It includes standalone
 agentgateway, Node.js/npm, an isolated Python environment, PostgreSQL client

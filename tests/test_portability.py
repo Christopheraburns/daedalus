@@ -96,3 +96,24 @@ def test_import_protects_existing_packs_and_rejects_bad_files(registry, monkeypa
     unknown = {**document, "packs": {}, "tools": [{"ref": "t1", "spec": {**next(x for x in document["tools"] if x["spec"]["name"] == "shout")["spec"], "pack": "nowhere"}}], "layout": {}}
     assert client.post("/api/servers/import", json={"document": unknown}).status_code == 422
     assert len(client.get("/api/servers").json()) == servers_before  # a failed import leaves nothing behind
+
+
+def test_exports_carry_seed_pack_code_and_imports_enable_the_seed(registry):
+    client, sessions, settings = registry
+    assert client.put("/api/packs/webhdfs_admin/enabled", json={"enabled": True}).status_code == 200
+    assert client.post("/api/policies/origins", json={"origin": MOCK, "description": "Fixture"}).status_code == 201
+    connection = client.post("/api/connections", json={"name": "HDFS", "base_url": MOCK, "protocol": "webhdfs"}).json()
+    assert client.post("/api/tools", json={"name": "summary", "description": "Space used.", "kind": "python", "pack": "webhdfs_admin", "function": "get_content_summary", "connection_id": connection["id"]}).status_code == 201
+    document = client.get("/api/export").json()
+    assert "def get_content_summary" in document["packs"]["webhdfs_admin"]
+    # On the importing side the seed is switched off; the import turns it on rather than copying the code.
+    assert client.put("/api/packs/webhdfs_admin/enabled", json={"enabled": False}).status_code == 409  # still in use here
+    with sessions.begin() as session:
+        from factory.db import Tool
+        for tool in session.query(Tool).all():
+            session.delete(tool)
+    assert client.put("/api/packs/webhdfs_admin/enabled", json={"enabled": False}).status_code == 200
+    imported = client.post("/api/servers/import", json={"document": document, "name": "Copy"})
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["packs_written"] == []
+    assert next(s for s in client.get("/api/packs/seeds").json()["seeds"] if s["name"] == "webhdfs_admin")["enabled"]
