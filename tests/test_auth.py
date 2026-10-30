@@ -31,11 +31,16 @@ def test_credentials_by_mode():
     assert auth.credentials({"auth_mode": "static", "secret_ref": "FACTORY_SECRET_X"}, user, {"FACTORY_SECRET_X": "s"}) == ({"Authorization": "Bearer s"}, {})
     with pytest.raises(ValueError, match="FACTORY_SECRET_X is not set"):
         auth.credentials({"auth_mode": "static", "secret_ref": "FACTORY_SECRET_X"}, user, {})
+    assert auth.credentials({"auth_mode": "basic", "secret_ref": "FACTORY_SECRET_X"}, user, {"FACTORY_SECRET_X": "svc:pa:ss"}) == ({"Authorization": "Basic c3ZjOnBhOnNz"}, {})
+    with pytest.raises(ValueError, match="user:password"):
+        auth.credentials({"auth_mode": "basic", "secret_ref": "FACTORY_SECRET_X"}, user, {"FACTORY_SECRET_X": "no-colon"})
+    with pytest.raises(ValueError, match="not set"):
+        auth.credentials({"auth_mode": "basic", "secret_ref": "FACTORY_SECRET_X"}, user, {})
     assert auth.credentials({"auth_mode": "forward-token"}, user) == ({"Authorization": "Bearer caller-token"}, {})
     assert auth.credentials({"auth_mode": "forward-token"}, Caller("alice")) == ({}, {})  # tests and probes carry no caller token
     with pytest.raises(ValueError, match="Kerberos"):
         auth.credentials({"auth_mode": "proxy-doas", "proxy_principal": "svc@EXAMPLE", "keytab_ref": "FACTORY_SECRET_KT", "doas_parameter": "doAs"}, user)
-    for bad in ({"auth_mode": "static"}, {"auth_mode": "static", "secret_ref": "PASSWORD"}, {"auth_mode": "proxy-doas"}, {"auth_mode": "proxy-doas", "proxy_principal": "svc", "keytab_ref": "FACTORY_SECRET_KT", "doas_parameter": "do as"}):
+    for bad in ({"auth_mode": "static"}, {"auth_mode": "static", "secret_ref": "PASSWORD"}, {"auth_mode": "basic"}, {"auth_mode": "proxy-doas"}, {"auth_mode": "proxy-doas", "proxy_principal": "svc", "keytab_ref": "FACTORY_SECRET_KT", "doas_parameter": "do as"}):
         with pytest.raises(ValueError):
             auth.validate(bad)
 
@@ -87,6 +92,16 @@ def test_static_and_forwarded_credentials_reach_the_backend(registry, monkeypatc
     failed = run_tool(client, rest, {})
     assert not failed["success"] and "FACTORY_SECRET_MOCK is not set" in failed["error"]
     monkeypatch.setenv("FACTORY_SECRET_MOCK", "s3cret-value-123")
+    # basic: the same secret mechanism, sent as a Basic header by both kinds of tool.
+    monkeypatch.setenv("FACTORY_SECRET_RANGER", "auditor:auditor-secret")
+    basic = connection(client, name="Basic", auth_mode="basic", secret_ref="FACTORY_SECRET_RANGER")
+    fetch_basic = tool(client, "fetch_basic", basic["id"], kind="python", pack="demo", function="fetch_json")
+    assert unwrap(result_of(client, fetch_basic, {"body": {"path": "/fixture/echo"}}))["items"]["authorization"] == "Basic YXVkaXRvcjphdWRpdG9yLXNlY3JldA=="
+    rest_basic = tool(client, "echo_basic", basic["id"], method="GET", path="/fixture/echo")
+    assert unwrap(result_of(client, rest_basic, {}))["authorization"] == "Basic YXVkaXRvcjphdWRpdG9yLXNlY3JldA=="
+    assert "auditor-secret" not in client.get("/api/workspace").text
+    monkeypatch.setenv("FACTORY_SECRET_RANGER", "no-colon")
+    assert "user:password" in run_tool(client, rest_basic, {})["error"]
     # forward-token without caller identity on this server: Python tools report it, HTTP tools cannot be configured.
     forward = connection(client, name="Forward", auth_mode="forward-token")
     whoami_fetch = tool(client, "fetch_forward", forward["id"], kind="python", pack="demo", function="fetch_json")

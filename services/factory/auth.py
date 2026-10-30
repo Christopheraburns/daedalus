@@ -8,6 +8,8 @@ for declarative HTTP tools (see gateway.target_policies).
     none           no credential; the backend is open or network-trusted
     static         a service secret from the Server application's environment
                    (FACTORY_SECRET_*), sent as a bearer token
+    basic          a service account's HTTP Basic credential from the environment as
+                   FACTORY_SECRET_<NAME>="user:password" (Ranger, Atlas, Recon, LDAP-backed APIs)
     forward-token  the caller's own bearer token, as presented to the gateway
     proxy-doas     a fixed service principal acting as the caller (doAs); the
                    Kerberos/SPNEGO exchange is integrated on the target cluster
@@ -15,6 +17,7 @@ for declarative HTTP tools (see gateway.target_policies).
                    environment as FACTORY_SECRET_<NAME>="ACCESS_KEY:SECRET_KEY";
                    every request is signed with AWS Signature Version 4
 """
+import base64
 import datetime
 import hashlib
 import hmac
@@ -24,7 +27,7 @@ from urllib.parse import quote
 
 import httpx
 
-MODES = ("none", "static", "forward-token", "proxy-doas", "s3-sigv4")
+MODES = ("none", "static", "basic", "forward-token", "proxy-doas", "s3-sigv4")
 SECRET_REF = re.compile(r"^FACTORY_SECRET_[A-Z0-9_]{1,60}$")
 
 
@@ -34,6 +37,8 @@ def validate(connection):
         raise ValueError("Unknown authentication mode")
     if mode == "static" and not SECRET_REF.match(connection.get("secret_ref", "")):
         raise ValueError("Static authentication needs a secret reference named FACTORY_SECRET_<NAME>; the value lives in the Server application's environment")
+    if mode == "basic" and not SECRET_REF.match(connection.get("secret_ref", "")):
+        raise ValueError("Basic authentication needs a secret reference named FACTORY_SECRET_<NAME> whose value is user:password")
     if mode == "s3-sigv4" and not SECRET_REF.match(connection.get("secret_ref", "")):
         raise ValueError("S3 authentication needs a secret reference named FACTORY_SECRET_<NAME> whose value is ACCESS_KEY:SECRET_KEY")
     if mode == "proxy-doas":
@@ -56,6 +61,8 @@ def credentials(connection, caller, environ=None):
         if not value:
             raise ValueError(f"Secret {connection['secret_ref']} is not set in the Server application's environment")
         return {"Authorization": f"Bearer {value}"}, {}
+    if mode == "basic":
+        return {"Authorization": basic_header(connection, environ)}, {}
     if mode == "forward-token":
         # Live servers with caller identity always have a token; Builder tests and loopback probes run without
         # one, and like REST tools they send no credential rather than inventing one.
@@ -67,6 +74,17 @@ def credentials(connection, caller, environ=None):
         # needs a Kerberos ticket from the keytab, which only the target cluster can issue.
         raise ValueError(f"Proxy authentication as {connection['proxy_principal']} for {caller.username} needs Kerberos support that this build does not include; integrate it on the target cluster")
     raise ValueError("Unknown authentication mode")
+
+
+def basic_header(connection, environ=None):
+    """The Authorization header for a basic connection, from FACTORY_SECRET_<NAME>="user:password"."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(connection["secret_ref"], "")
+    if not value:
+        raise ValueError(f"Secret {connection['secret_ref']} is not set in the Server application's environment")
+    if ":" not in value:
+        raise ValueError(f"Secret {connection['secret_ref']} must be set to user:password for Basic authentication")
+    return "Basic " + base64.b64encode(value.encode("utf-8")).decode()
 
 
 def s3_auth(connection, region="us-east-1", environ=None):

@@ -337,6 +337,7 @@ API hosts an SDK-built upstream at `http://mock-api:8080/upstream/mcp`. Each con
 | --- | --- | --- |
 | `none` | nothing | — |
 | `static` | `Authorization: Bearer <secret>` | a `FACTORY_SECRET_*` variable on the Server application; the registry stores only its name |
+| `basic` | `Authorization: Basic <user:password>` | a `FACTORY_SECRET_*` variable holding `user:password`; Python and REST tools alike (Ranger, Atlas, Recon, LDAP-backed APIs) |
 | `forward-token` | the caller's own bearer token | the client's request; requires caller identity below |
 | `proxy-doas` | `doAs=<caller>` as a fixed service principal (Python tools only) | keytab reference; the Kerberos exchange is integrated per cluster |
 
@@ -426,8 +427,21 @@ redirect only with `follow_redirects` in the tool configuration, as in the
 The second seed, `s3_extras`, adds to the `s3` pack what the catalogue kept from
 the Ozone S3 Gateway: a bucket access check, deleting up to 1,000 objects in one
 request, and object tags (read, set with merge or replace, remove named tags or
-all). Both seeds are tested against the same fakes as the built-in packs
-(the in-memory WebHDFS in `mock-api`, the SeaweedFS S3 gateway). Editing a seed makes a
+all). The third seed, `ranger_public`, is a read-only view of Apache Ranger
+(31 tools: service types, services, policies, roles, security zones, tags) so an
+agent can explain who may access what. It is configured rather than built for one
+deployment: `prefix` points at Ranger Admin directly or at a Knox path, the
+connection's `auth_mode` is `basic` (a service account; Ranger's Auditor role is
+the read-only fit), `forward-token` (the caller's Knox JWT) or `static`, and
+`scope` is `all` or `caller`. In caller scope every policy and role answer is
+narrowed to the calling user's own grants, through their groups and roles, using
+Ranger's own search filters, while services, service types and zones stay
+visible because they describe structure rather than grants. A Ranger without
+roles or security zones (before 2.0) produces a clear message on those tools,
+and the connection check reports which feature groups answered. All seeds are
+tested against fakes in `mock-api` and the SeaweedFS S3 gateway; the Ranger fake
+serves two prefixes, Basic and Bearer credentials, an auditor and a limited
+account, and an old-Ranger prefix. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored

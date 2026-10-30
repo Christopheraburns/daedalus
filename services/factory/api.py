@@ -610,6 +610,9 @@ def create_app(settings=None):
                 # Everything about packs is read here; nothing below may touch the session once this block ends.
                 pack_resolver, pack_sources = packstore.view(session, settings)
                 probe_packs = packstore.probes(session, settings, spec.get("protocol", "rest"))
+                # A pack whose tools use this connection knows the endpoint best (Ranger, not generic REST), so its probe runs.
+                used = {t.spec.get("pack") for t in session.scalars(select(Tool).where(Tool.server_id == server_id, Tool.connection_id == id)) if t.spec.get("kind") == "python"}
+                probe_packs = [p for p in probe_packs if p[0] in used] or probe_packs
             started = time.monotonic()
             protocol = spec.get("protocol", "rest")
             discovered = None

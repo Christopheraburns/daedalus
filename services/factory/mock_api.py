@@ -401,3 +401,295 @@ def webhdfs_extra(op, path, entry, query, body, user):
             diffs += [{"sourcePath": p[len(path.rstrip("/")):] or "/", "targetPath": "", "type": "MODIFY"} for p in after if p in before and after[p].get("content") != before[p].get("content")]
             return {"SnapshotDiffReport": {"diffList": sorted(diffs, key=lambda d: (d["type"], d["sourcePath"])), "fromSnapshot": old, "snapshotRoot": path, "toSnapshot": name}}
     return remote_exception(400, "UnsupportedOperationException", f"Unsupported operation: {op}")
+
+
+# ---- Apache Ranger fake ---------------------------------------------------------------
+# The public v2 API's read side, served at the direct Ranger Admin path and at a Knox-style path,
+# with Basic credentials (an Auditor service account and a limited user) or a Bearer JWT whose
+# subject is the user. /ranger-1 serves the same data as a Ranger without roles and zones, so
+# packs can show their version tolerance. Policies, roles and zones are small but mention users,
+# groups and roles, so caller-scoped searches have something to narrow.
+RANGER_ACCOUNTS = {"auditor": ("auditor-secret", "AUDITOR"), "alice": ("alice-secret", "USER"), "bob": ("bob-secret", "USER")}
+RANGER_GROUPS = {"alice": ["analysts"], "bob": ["finance"], "carol": ["finance", "analysts"]}
+RANGER_SERVICE_DEFS = [
+    {"id": 1, "guid": "0d047247-bafe-4cf8-8e9b-d5d377284b2d", "name": "hdfs", "displayName": "HDFS", "implClass": "org.apache.ranger.services.hdfs.RangerServiceHdfs", "label": "HDFS Repository",
+        "resources": [{"itemId": 1, "name": "path", "type": "path", "level": 10, "recursiveSupported": True, "excludesSupported": False, "label": "Resource Path"}],
+        "accessTypes": [{"itemId": 1, "name": "read"}, {"itemId": 2, "name": "write"}, {"itemId": 3, "name": "execute"}]},
+    {"id": 3, "guid": "3e1afb5a-184a-4e82-9d9c-87a5cacc243c", "name": "hive", "displayName": "Hadoop SQL", "implClass": "org.apache.ranger.services.hive.RangerServiceHive", "label": "Hive Server2",
+        "resources": [{"itemId": 1, "name": "database", "type": "string", "level": 10, "recursiveSupported": False, "excludesSupported": True, "label": "Hive Database"},
+            {"itemId": 2, "name": "table", "type": "string", "level": 20, "parent": "database", "label": "Hive Table"}, {"itemId": 3, "name": "column", "type": "string", "level": 30, "parent": "table", "label": "Hive Column"}],
+        "accessTypes": [{"itemId": 1, "name": "select"}, {"itemId": 2, "name": "update"}, {"itemId": 3, "name": "create"}, {"itemId": 4, "name": "drop"}, {"itemId": 5, "name": "all"}]},
+]
+RANGER_SERVICES = [
+    {"id": 1, "guid": "6b7f1e0a-1111-4f5e-9a1b-aaaaaaaaaaaa", "isEnabled": True, "createdBy": "Admin", "updatedBy": "Admin", "version": 4, "type": "hdfs", "name": "cm_hdfs", "displayName": "cm_hdfs", "description": "Cluster HDFS",
+        "configs": {"username": "hdfs", "hadoop.security.authentication": "kerberos", "fs.default.name": "hdfs://nn.example.internal:8020"}, "policyVersion": 12, "tagVersion": 1},
+    {"id": 2, "guid": "6b7f1e0a-2222-4f5e-9a1b-bbbbbbbbbbbb", "isEnabled": True, "createdBy": "Admin", "updatedBy": "Admin", "version": 7, "type": "hive", "name": "cm_hive", "displayName": "Hadoop SQL", "description": "Hive, Impala and Spark SQL",
+        "configs": {"username": "hive", "jdbc.url": "jdbc:hive2://hs2.example.internal:10000"}, "policyVersion": 31, "tagVersion": 3},
+]
+RANGER_ROLES = [
+    {"id": 1, "guid": "r-1", "isEnabled": True, "createdBy": "Admin", "name": "data_stewards", "description": "Curate shared datasets", "options": {},
+        "users": [{"name": "alice", "isAdmin": False}, {"name": "carol", "isAdmin": True}], "groups": [{"name": "analysts", "isAdmin": False}], "roles": []},
+    {"id": 2, "guid": "r-2", "isEnabled": True, "createdBy": "Admin", "name": "finance_admins", "description": "Own the finance databases", "options": {},
+        "users": [{"name": "bob", "isAdmin": True}], "groups": [{"name": "finance", "isAdmin": False}], "roles": []},
+]
+
+
+def ranger_policy(id, service, name, resources, items, **extra):
+    service_type = next(s["type"] for s in RANGER_SERVICES if s["name"] == service)
+    return {"id": id, "guid": f"p-{id:04d}-{service}", "isEnabled": True, "version": 1, "service": service, "serviceType": service_type, "name": name, "policyType": extra.pop("policyType", 0),
+        "policyPriority": 0, "description": extra.pop("description", ""), "isAuditEnabled": True, "resources": {k: {"values": v, "isExcludes": False, "isRecursive": k == "path"} for k, v in resources.items()},
+        "policyItems": [{"accesses": [{"type": a, "isAllowed": True} for a in accesses], "users": users, "groups": groups, "roles": roles, "conditions": [], "delegateAdmin": False}
+            for accesses, users, groups, roles in items], "denyPolicyItems": [], "allowExceptions": [], "denyExceptions": [], "dataMaskPolicyItems": [], "rowFilterPolicyItems": [],
+        "zoneName": extra.pop("zoneName", ""), "isDenyAllElse": False, **extra}
+
+
+RANGER_POLICIES = [
+    ranger_policy(1, "cm_hdfs", "all - path", {"path": ["/*"]}, [(["read", "write", "execute"], ["hdfs"], ["hadoop"], [])], description="Default policy"),
+    ranger_policy(2, "cm_hdfs", "shared datasets", {"path": ["/data/shared"]}, [(["read", "execute"], [], ["analysts"], []), (["read", "write", "execute"], [], [], ["data_stewards"])]),
+    ranger_policy(3, "cm_hdfs", "alice home", {"path": ["/user/alice"]}, [(["read", "write", "execute"], ["alice"], [], [])]),
+    ranger_policy(4, "cm_hive", "sales database", {"database": ["sales"], "table": ["*"], "column": ["*"]}, [(["select"], [], ["analysts"], []), (["all"], [], [], ["data_stewards"])]),
+    ranger_policy(5, "cm_hive", "finance database", {"database": ["finance"], "table": ["*"], "column": ["*"]}, [(["all"], [], ["finance"], ["finance_admins"])], zoneName="finance-zone"),
+    ranger_policy(6, "cm_hive", "mask salaries", {"database": ["finance"], "table": ["payroll"], "column": ["salary"]}, [], policyType=1, zoneName="finance-zone",
+        dataMaskPolicyItems=[{"dataMaskInfo": {"dataMaskType": "MASK"}, "accesses": [{"type": "select", "isAllowed": True}], "users": [], "groups": ["analysts"], "roles": [], "conditions": []}]),
+]
+RANGER_ZONES = [
+    {"id": 1, "guid": "z-1", "isEnabled": True, "createdBy": "Admin", "name": "finance-zone", "description": "Finance data, administered by finance", "version": 2,
+        "services": {"cm_hive": {"resources": [{"database": ["finance"]}]}}, "tagServices": [], "adminUsers": ["bob"], "adminUserGroups": ["finance"], "auditUsers": ["auditor"], "auditUserGroups": []},
+]
+RANGER_TAGS = {"cm_hive": {"op": "add_or_update", "serviceName": "cm_hive", "tagVersion": 3, "tagUpdateTime": 1760000000000,
+    "tagDefinitions": {"1": {"id": 1, "guid": "td-1", "name": "PII", "source": "Atlas", "attributeDefs": [{"name": "type", "type": "string"}]}},
+    "tags": {"1": {"id": 1, "guid": "t-1", "type": "PII", "attributes": {"type": "salary"}}},
+    "serviceResources": [{"id": 1, "guid": "sr-1", "serviceName": "cm_hive", "resourceElements": {"database": {"values": ["finance"]}, "table": {"values": ["payroll"]}, "column": {"values": ["salary"]}}}],
+    "resourceToTagIds": {"1": [1]}}}
+
+
+def ranger_user(request):
+    """The authenticated user and role, or None. Basic against the accounts table; Bearer JWTs are trusted for their subject (Knox already verified them)."""
+    header = request.headers.get("authorization", "")
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() == "basic":
+        try:
+            user, _, password = base64.b64decode(value).decode().partition(":")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        account = RANGER_ACCOUNTS.get(user)
+        return (user, account[1]) if account and account[0] == password else None
+    if scheme.lower() == "bearer" and value.count(".") == 2:
+        payload = value.split(".")[1]
+        try:
+            claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        subject = claims.get("sub")
+        return (subject, RANGER_ACCOUNTS.get(subject, ("", "USER"))[1]) if subject else None
+    return None
+
+
+def ranger_error(status, message):
+    return JSONResponse({"statusCode": 1, "msgDesc": message, "messageList": [{"name": "OPER_NOT_ALLOWED_FOR_ENTITY" if status == 403 else "DATA_NOT_FOUND", "rbKey": "", "message": message}]}, status_code=status)
+
+
+def ranger_principals(user):
+    """What a Ranger `user=` search filter matches: the user, their groups, the roles those reach, plus public."""
+    groups = set(RANGER_GROUPS.get(user, [])) | {"public"}
+    roles = {r["name"] for r in RANGER_ROLES if any(u["name"] == user for u in r["users"]) or groups & {g["name"] for g in r["groups"]}}
+    return groups, roles
+
+
+def ranger_items(policy):
+    return policy["policyItems"] + policy["denyPolicyItems"] + policy["allowExceptions"] + policy["denyExceptions"] + policy["dataMaskPolicyItems"] + policy["rowFilterPolicyItems"]
+
+
+def ranger_mentions(policy, user=None, group=None, role=None):
+    items = ranger_items(policy)
+    if user:
+        groups, roles = ranger_principals(user)
+        return any(user in i["users"] or groups & set(i["groups"]) or roles & set(i["roles"]) for i in items)
+    if group:
+        return any(group in i["groups"] for i in items)
+    if role:
+        return any(role in i["roles"] for i in items)
+    return True
+
+
+def ranger_search(policies, query):
+    """The subset of Ranger's SearchFilter that the read tools use."""
+    for key, value in query.items():
+        if not value:
+            continue
+        if key == "serviceName":
+            policies = [p for p in policies if p["service"] == value]
+        elif key == "serviceType":
+            policies = [p for p in policies if p["serviceType"] == value]
+        elif key == "policyName":
+            policies = [p for p in policies if p["name"] == value]
+        elif key == "policyNamePartial":
+            policies = [p for p in policies if value.lower() in p["name"].lower()]
+        elif key == "policyId":
+            policies = [p for p in policies if str(p["id"]) == value]
+        elif key == "guid":
+            policies = [p for p in policies if p["guid"] == value]
+        elif key == "policyType":
+            policies = [p for p in policies if str(p["policyType"]) == value]
+        elif key == "zoneName":
+            policies = [p for p in policies if p["zoneName"] == value]
+        elif key == "user":
+            policies = [p for p in policies if ranger_mentions(p, user=value)]
+        elif key == "group":
+            policies = [p for p in policies if ranger_mentions(p, group=value)]
+        elif key == "role":
+            policies = [p for p in policies if ranger_mentions(p, role=value)]
+        elif key.startswith("resource:"):
+            name = key[len("resource:"):]
+            policies = [p for p in policies if name in p["resources"] and any(ranger_resource_match(v, value) for v in p["resources"][name]["values"])]
+    start, size = int(query.get("startIndex", 0)), int(query.get("pageSize", 200))
+    return policies[start:start + size]
+
+
+def ranger_resource_match(pattern, value):
+    if pattern == "*" or pattern == value:
+        return True
+    if pattern.endswith("*"):
+        return value.startswith(pattern[:-1])
+    if pattern.endswith("/*") or pattern.endswith("/"):
+        return value.startswith(pattern.rstrip("*"))
+    return value.startswith(pattern.rstrip("/") + "/")  # recursive path policies
+
+
+def ranger_for_resource(service_def, service, query):
+    policies = [p for p in RANGER_POLICIES if p["serviceType"] == service_def and (not service or p["service"] == service)]
+    wanted = {k[len("resource:"):]: v for k, v in query.items() if k.startswith("resource:")}
+    return [p for p in policies if all(name in p["resources"] and any(ranger_resource_match(v, value) for v in p["resources"][name]["values"]) for name, value in wanted.items())]
+
+
+def ranger_zone_header(zone):
+    return {"id": zone["id"], "name": zone["name"]}
+
+
+def ranger_service_header(service):
+    return {"id": service["id"], "name": service["name"], "displayName": service["displayName"], "type": service["type"], "isEnabled": service["isEnabled"], "isTagService": False}
+
+
+def ranger_zone_resources(zone, service_name):
+    entry = zone["services"].get(service_name)
+    if entry is None:
+        return ranger_error(404, f"Service {service_name} is not part of zone {zone['name']}")
+    return [{"id": i + 1, "resource": r} for i, r in enumerate(entry["resources"])]
+
+
+@app.api_route("/service/public/v2/api/{rest:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def ranger_direct(rest: str, request: Request):
+    return ranger_api(rest, request, features=True)
+
+
+@app.api_route("/gateway/cdp-proxy-api/ranger/service/public/v2/api/{rest:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def ranger_knox(rest: str, request: Request):
+    return ranger_api(rest, request, features=True)
+
+
+@app.api_route("/ranger-1/service/public/v2/api/{rest:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def ranger_old(rest: str, request: Request):
+    return ranger_api(rest, request, features=False)
+
+
+def ranger_api(rest, request, features):
+    identity = ranger_user(request)
+    if identity is None:
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Ranger"'}, content="Authentication required")
+    user, role = identity
+    query = dict(request.query_params)
+    parts = rest.strip("/").split("/")
+    if request.method != "GET":
+        return ranger_error(403, f"User {user} is not authorized to perform {request.method} on {rest}") if role != "ADMIN" else ranger_error(400, "Writes are not implemented by the fixture")
+    if not features and parts[0] in {"roles", "zones", "zones-v2", "zone-headers", "zone-names"}:
+        return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+    # Roles a user holds are visible to that user; everything else needs the Auditor (or Admin) role.
+    if parts[:2] == ["roles", "user"] and len(parts) == 3:
+        if role == "USER" and parts[2] != user:
+            return ranger_error(403, f"User {user} is not authorized to view roles of {parts[2]}")
+        return [r["name"] for r in RANGER_ROLES if r["name"] in ranger_principals(parts[2])[1]]
+    if role == "USER":
+        return ranger_error(403, f"User {user} is not authorized to access {rest}; only administrators and auditors may read policies through this API")
+    # Services and service definitions
+    if parts == ["servicedef"]:
+        return [d for d in RANGER_SERVICE_DEFS if not query.get("serviceType") or d["name"] == query["serviceType"]]
+    if parts[:2] == ["servicedef", "name"] and len(parts) == 3:
+        return next((d for d in RANGER_SERVICE_DEFS if d["name"] == parts[2]), None) or ranger_error(404, f"Service definition {parts[2]} not found")
+    if parts[0] == "servicedef" and len(parts) == 2:
+        return next((d for d in RANGER_SERVICE_DEFS if str(d["id"]) == parts[1]), None) or ranger_error(404, f"Service definition {parts[1]} not found")
+    if parts == ["service"]:
+        return [s for s in RANGER_SERVICES if (not query.get("serviceType") or s["type"] == query["serviceType"]) and (not query.get("serviceName") or s["name"] == query["serviceName"])
+            and (not query.get("serviceNamePartial") or query["serviceNamePartial"].lower() in s["name"].lower())]
+    if parts == ["service-headers"]:
+        return [ranger_service_header(s) for s in RANGER_SERVICES]
+    if parts[:2] == ["service", "name"] and len(parts) == 3:
+        return next((s for s in RANGER_SERVICES if s["name"] == parts[2]), None) or ranger_error(404, f"Service {parts[2]} not found")
+    if parts[0] == "service" and len(parts) == 2:
+        return next((s for s in RANGER_SERVICES if str(s["id"]) == parts[1]), None) or ranger_error(404, f"Service {parts[1]} not found")
+    if parts[0] == "service" and len(parts) == 3 and parts[2] == "tags":
+        if not any(s["name"] == parts[1] for s in RANGER_SERVICES):
+            return ranger_error(404, f"Service {parts[1]} not found")
+        tags = RANGER_TAGS.get(parts[1]) or {"op": "add_or_update", "serviceName": parts[1], "tagVersion": 0, "tagDefinitions": {}, "tags": {}, "serviceResources": [], "resourceToTagIds": {}}
+        return Response(status_code=304) if query.get("lastKnownVersion") == str(tags["tagVersion"]) else tags
+    if parts[0] == "service" and len(parts) == 3 and parts[2] == "policy":
+        if not any(s["name"] == parts[1] for s in RANGER_SERVICES):
+            return ranger_error(404, f"Service {parts[1]} not found")
+        return ranger_search(RANGER_POLICIES, {**query, "serviceName": parts[1]})
+    if parts[0] == "service" and len(parts) == 4 and parts[2] == "policy":
+        found = [p for p in RANGER_POLICIES if p["service"] == parts[1] and p["name"] == parts[3] and p["zoneName"] == query.get("zoneName", "")]
+        return found[0] if found else ranger_error(404, f"Policy {parts[3]} not found in service {parts[1]}" + (f" zone {query['zoneName']}" if query.get("zoneName") else ""))
+    # Policies
+    if parts == ["policy"]:
+        return ranger_search(RANGER_POLICIES, query)
+    if parts[:2] == ["policy", "guid"] and len(parts) == 3:
+        found = [p for p in RANGER_POLICIES if p["guid"] == parts[2] and (not query.get("serviceName") or p["service"] == query["serviceName"]) and p["zoneName"] == query.get("zoneName", "")]
+        return found[0] if found else ranger_error(404, f"Policy with guid {parts[2]} not found")
+    if parts[0] == "policy" and len(parts) == 2:
+        return next((p for p in RANGER_POLICIES if str(p["id"]) == parts[1]), None) or ranger_error(404, f"Policy {parts[1]} not found")
+    if parts[0] == "policies" and len(parts) == 3 and parts[2] == "for-resource":
+        if not any(d["name"] == parts[1] for d in RANGER_SERVICE_DEFS):
+            return ranger_error(404, f"Service definition {parts[1]} not found")
+        return ranger_for_resource(parts[1], query.get("serviceName", ""), query)
+    # Roles
+    if parts == ["roles"]:
+        roles = RANGER_ROLES
+        if query.get("roleName"):
+            roles = [r for r in roles if r["name"] == query["roleName"]]
+        if query.get("roleNamePartial"):
+            roles = [r for r in roles if query["roleNamePartial"].lower() in r["name"].lower()]
+        if query.get("userName"):
+            roles = [r for r in roles if r["name"] in ranger_principals(query["userName"])[1]]
+        if query.get("groupName"):
+            roles = [r for r in roles if any(g["name"] == query["groupName"] for g in r["groups"])]
+        return roles
+    if parts == ["roles", "names"]:
+        return [r["name"] for r in RANGER_ROLES]
+    if parts[:2] == ["roles", "name"] and len(parts) == 3:
+        return next((r for r in RANGER_ROLES if r["name"] == parts[2]), None) or ranger_error(404, f"Role {parts[2]} not found")
+    if parts[0] == "roles" and len(parts) == 2:
+        return next((r for r in RANGER_ROLES if str(r["id"]) == parts[1]), None) or ranger_error(404, f"Role {parts[1]} not found")
+    # Security zones
+    if parts == ["zone-headers"]:
+        return [ranger_zone_header(z) for z in RANGER_ZONES]
+    if parts[0] == "zone-names" and len(parts) == 3 and parts[2] == "resource":
+        wanted = {k[len("resource:"):]: v for k, v in query.items() if k.startswith("resource:")}
+        return [z["name"] for z in RANGER_ZONES if parts[1] in z["services"] and any(all(name in r and any(ranger_resource_match(p, value) for p in r[name]) for name, value in wanted.items()) for r in z["services"][parts[1]]["resources"])]
+    if parts in (["zones"], ["zones-v2"]):
+        return RANGER_ZONES
+    if parts[0] in {"zones", "zones-v2"} and len(parts) == 3 and parts[1] == "name":
+        return next((z for z in RANGER_ZONES if z["name"] == parts[2]), None) or ranger_error(404, f"Security zone {parts[2]} not found")
+    if parts[0] == "zones-v2" and len(parts) == 5 and parts[1] == "name" and parts[3] == "resources":
+        zone = next((z for z in RANGER_ZONES if z["name"] == parts[2]), None)
+        return ranger_zone_resources(zone, parts[4]) if zone else ranger_error(404, f"Security zone {parts[2]} not found")
+    if parts[0] == "zones-v2" and len(parts) == 4 and parts[2] == "resources":
+        zone = next((z for z in RANGER_ZONES if str(z["id"]) == parts[1]), None)
+        return ranger_zone_resources(zone, parts[3]) if zone else ranger_error(404, f"Security zone {parts[1]} not found")
+    if parts[:3] == ["zones", "zone-headers", "for-service"] and len(parts) == 4:
+        service = next((s for s in RANGER_SERVICES if str(s["id"]) == parts[3]), None)
+        return [ranger_zone_header(z) for z in RANGER_ZONES if service and service["name"] in z["services"]]
+    if parts[0] == "zones" and len(parts) == 3 and parts[2] == "service-headers":
+        zone = next((z for z in RANGER_ZONES if str(z["id"]) == parts[1]), None)
+        return [ranger_service_header(s) for s in RANGER_SERVICES if zone and s["name"] in zone["services"]] if zone else ranger_error(404, f"Security zone {parts[1]} not found")
+    if parts[0] in {"zones", "zones-v2"} and len(parts) == 2:
+        return next((z for z in RANGER_ZONES if str(z["id"]) == parts[1]), None) or ranger_error(404, f"Security zone {parts[1]} not found")
+    return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")

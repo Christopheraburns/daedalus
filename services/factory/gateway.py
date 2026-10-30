@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 from jsonschema import Draft202012Validator
 
+from . import auth
 from .compiler import canonical, executor_schema
 from .settings import LEGACY, MODERN, ROOT
 
@@ -137,6 +138,10 @@ def target_policies(connection, secrets, jwt, forwarding):
     mode = connection.get("auth_mode", "none")
     if mode == "static":
         return {"backendAuth": {"key": {"value": {"file": secrets[connection["secret_ref"]]}}}}
+    if mode == "basic":
+        # agentgateway's key auth sends a bearer token, so the Basic header is set directly; the generated
+        # configuration is written 0600 like the secret files it sits beside.
+        return {"requestHeaderModifier": {"set": {"Authorization": auth.basic_header(connection, {connection["secret_ref"]: Path(secrets[connection["secret_ref"]]).read_text()})}}}
     if mode == "forward-token":
         if jwt:
             return {"backendAuth": {"passthrough": {}}}
@@ -163,7 +168,7 @@ def materialize_secrets(bundle, directory):
     """Static connection secrets as 0600 files the gateway reads; missing ones fail the release."""
     paths = {}
     for connection in bundle.get("connections", {}).values():
-        if connection.get("auth_mode") == "static":
+        if connection.get("auth_mode") in {"static", "basic"}:
             ref = connection["secret_ref"]
             value = os.environ.get(ref, "")
             if not value:
@@ -224,6 +229,7 @@ def validate_config(config, settings, path):
     schema = json.loads((ROOT / "schemas/vendor/agentgateway-1.6.0.json").read_text())
     Draft202012Validator(schema).validate(config)
     path.write_text(canonical(config))
+    path.chmod(0o600)  # basic connections put a credential header in the configuration
     process = subprocess.run([settings.gateway_binary, "--validate-only", "-f", str(path)], capture_output=True, text=True, timeout=20)
     if process.returncode:
         raise GatewayError("Generated configuration rejected by agentgateway: " + process.stderr[-600:])
