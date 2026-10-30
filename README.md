@@ -441,7 +441,15 @@ roles or security zones (before 2.0) produces a clear message on those tools,
 and the connection check reports which feature groups answered. All seeds are
 tested against fakes in `mock-api` and the SeaweedFS S3 gateway; the Ranger fake
 serves two prefixes, Basic and Bearer credentials, an auditor and a limited
-account, and an old-Ranger prefix. Editing a seed makes a
+account, and an old-Ranger prefix. The fourth seed, `atlas_discovery` (13
+tools), finds data in Apache Atlas: basic, filtered, DSL, full-text and quick
+searches, attribute prefix search, relationship and related-entity search, saved
+searches and name suggestions. Atlas filters results by the authenticated
+identity itself, so a `forward-token` connection through Knox answers with the
+caller's own view and a `basic` connection with the service account's; `prefix`
+again selects direct or Knox, and the four endpoints Atlas added in 2.1 report a
+clear message on older servers. The Atlas fake in `mock-api` has a sales mart
+alice may see and a finance ledger bob may see. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored

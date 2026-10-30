@@ -693,3 +693,287 @@ def ranger_api(rest, request, features):
     if parts[0] in {"zones", "zones-v2"} and len(parts) == 2:
         return next((z for z in RANGER_ZONES if str(z["id"]) == parts[1]), None) or ranger_error(404, f"Security zone {parts[1]} not found")
     return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+
+
+# ---- Apache Atlas fake --------------------------------------------------------------------
+# The discovery side of the v2 API (search, saved searches, suggestions) at the direct Atlas path, a
+# Knox-style path, and /atlas-1 for an Atlas without quick search, relationship search or
+# suggestions. Atlas itself filters results by the authenticated identity (the Ranger Atlas plugin),
+# so the fake does too: admin and auditor see everything, alice sees the sales mart, bob finance.
+import re as _re
+
+ATLAS_ACCOUNTS = {"admin": "admin-secret", "auditor": "auditor-secret", "alice": "alice-secret", "bob": "bob-secret"}
+ATLAS_VISIBLE = {"admin": None, "auditor": None, "alice": ("sales", "/data", "Customer"), "bob": ("finance", "/data")}
+
+
+def atlas_entity(guid, type_name, qualified_name, name, owner, status="ACTIVE", classifications=(), terms=(), **attributes):
+    return {"guid": guid, "typeName": type_name, "status": status, "displayText": name, "isIncomplete": False, "labels": [],
+        "classificationNames": list(classifications), "meaningNames": list(terms), "meanings": [{"displayText": t, "termGuid": f"term-{t.lower()}"} for t in terms],
+        "attributes": {"qualifiedName": qualified_name, "name": name, "owner": owner, **attributes}}
+
+
+ATLAS_ENTITIES = [
+    atlas_entity("db-sales", "hive_db", "sales@cm", "sales", "alice", description="Sales mart", clusterName="cm"),
+    atlas_entity("db-finance", "hive_db", "finance@cm", "finance", "bob", description="Finance ledger", clusterName="cm"),
+    atlas_entity("tbl-orders", "hive_table", "sales.orders@cm", "orders", "alice", classifications=["Curated"], description="Customer orders", tableType="MANAGED_TABLE", createTime=1760000000000),
+    atlas_entity("tbl-customers", "hive_table", "sales.customers@cm", "customers", "alice", classifications=["PII"], terms=["Customer"], description="Customer master data", tableType="MANAGED_TABLE"),
+    atlas_entity("tbl-orders-2019", "hive_table", "sales.orders_2019@cm", "orders_2019", "alice", status="DELETED", description="Archived orders"),
+    atlas_entity("tbl-payroll", "hive_table", "finance.payroll@cm", "payroll", "bob", classifications=["PII", "Confidential"], description="Monthly payroll", tableType="MANAGED_TABLE"),
+    atlas_entity("col-email", "hive_column", "sales.customers.email@cm", "email", "alice", classifications=["PII"], type="string"),
+    atlas_entity("col-salary", "hive_column", "finance.payroll.salary@cm", "salary", "bob", classifications=["PII"], type="decimal(12,2)"),
+    atlas_entity("path-shared", "hdfs_path", "/data/shared@cm", "shared", "hdfs", path="/data/shared"),
+    atlas_entity("term-customer", "AtlasGlossaryTerm", "Customer@Business", "Customer", "steward", shortDescription="A person or organisation that buys from us"),
+]
+ATLAS_RELATIONSHIPS = [
+    {"guid": "rel-1", "typeName": "hive_table_db", "status": "ACTIVE", "end1": "tbl-orders", "end2": "db-sales", "end1Attr": "db", "end2Attr": "tables"},
+    {"guid": "rel-2", "typeName": "hive_table_db", "status": "ACTIVE", "end1": "tbl-customers", "end2": "db-sales", "end1Attr": "db", "end2Attr": "tables"},
+    {"guid": "rel-3", "typeName": "hive_table_db", "status": "ACTIVE", "end1": "tbl-payroll", "end2": "db-finance", "end1Attr": "db", "end2Attr": "tables"},
+    {"guid": "rel-4", "typeName": "hive_table_columns", "status": "ACTIVE", "end1": "tbl-customers", "end2": "col-email", "end1Attr": "columns", "end2Attr": "table"},
+    {"guid": "rel-5", "typeName": "hive_table_columns", "status": "ACTIVE", "end1": "tbl-payroll", "end2": "col-salary", "end1Attr": "columns", "end2Attr": "table"},
+    {"guid": "rel-6", "typeName": "AtlasGlossarySemanticAssignment", "status": "ACTIVE", "end1": "term-customer", "end2": "tbl-customers", "end1Attr": "assignedEntities", "end2Attr": "meanings"},
+]
+ATLAS_SAVED = [
+    {"guid": "ss-1", "name": "PII tables", "ownerName": "admin", "searchType": "BASIC", "searchParameters": {"typeName": "hive_table", "classification": "PII", "excludeDeletedEntities": True, "limit": 25, "offset": 0}, "uiParameters": ""},
+    {"guid": "ss-2", "name": "my sales tables", "ownerName": "alice", "searchType": "ADVANCED", "searchParameters": {"query": "hive_table where owner = 'alice'", "limit": 25, "offset": 0}, "uiParameters": ""},
+]
+
+
+def atlas_user(request):
+    header = request.headers.get("authorization", "")
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() == "basic":
+        try:
+            user, _, password = base64.b64decode(value).decode().partition(":")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return user if ATLAS_ACCOUNTS.get(user) == password else None
+    if scheme.lower() == "bearer" and value.count(".") == 2:
+        payload = value.split(".")[1]
+        try:
+            return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))).get("sub")
+        except (ValueError, UnicodeDecodeError):
+            return None
+    return None
+
+
+def atlas_error(status, code, message):
+    return JSONResponse({"errorCode": code, "errorMessage": message}, status_code=status)
+
+
+def atlas_visible(user):
+    prefixes = ATLAS_VISIBLE.get(user, ())
+    return [e for e in ATLAS_ENTITIES if prefixes is None or any(e["attributes"]["qualifiedName"].startswith(p) for p in prefixes)]
+
+
+def atlas_by_guid(guid):
+    return next((e for e in ATLAS_ENTITIES if e["guid"] == guid), None)
+
+
+def atlas_text(entity):
+    return " ".join(str(v) for v in entity["attributes"].values()) + " " + " ".join(entity["classificationNames"] + entity["meaningNames"])
+
+
+def atlas_like(pattern, value):
+    return _re.fullmatch(_re.escape(pattern).replace(r"\*", ".*").replace(r"\?", "."), str(value), _re.I) is not None
+
+
+def atlas_filter(entities, criterion):
+    """SearchParameters.entityFilters: one {attributeName, operator, attributeValue} or {condition, criterion: [...]}."""
+    if "criterion" in criterion:
+        parts = [atlas_filter(entities, c) for c in criterion["criterion"]]
+        if criterion.get("condition", "AND").upper() == "OR":
+            seen = {e["guid"] for part in parts for e in part}
+            return [e for e in entities if e["guid"] in seen]
+        keep = set.intersection(*[{e["guid"] for e in part} for part in parts]) if parts else set()
+        return [e for e in entities if e["guid"] in keep]
+    name, op, wanted = criterion.get("attributeName", ""), criterion.get("operator", "=").lower(), str(criterion.get("attributeValue", ""))
+
+    def matches(entity):
+        value = entity["attributes"].get(name)
+        if op in ("isnull", "is_null"):
+            return value is None
+        if op in ("notnull", "not_null"):
+            return value is not None
+        if value is None:
+            return False
+        text = str(value)
+        return {"=": text == wanted, "eq": text == wanted, "!=": text != wanted, "neq": text != wanted, "like": atlas_like(wanted, text), "contains": wanted.lower() in text.lower(),
+            "startswith": text.lower().startswith(wanted.lower()), "endswith": text.lower().endswith(wanted.lower()),
+            "<": text < wanted, "lt": text < wanted, ">": text > wanted, "gt": text > wanted, "<=": text <= wanted, "lte": text <= wanted, ">=": text >= wanted, "gte": text >= wanted}.get(op, False)
+    return [e for e in entities if matches(e)]
+
+
+def atlas_basic(entities, params):
+    """Basic search over visible entities: type, classification, term, free-text query, deleted filter, entityFilters."""
+    if params.get("typeName"):
+        entities = [e for e in entities if e["typeName"] == params["typeName"]]
+    if params.get("classification"):
+        entities = [e for e in entities if params["classification"] in e["classificationNames"]]
+    if params.get("termName"):
+        entities = [e for e in entities if params["termName"] in e["meaningNames"]]
+    if params.get("query") and params["query"] != "*":
+        q = params["query"].rstrip("*").lower()
+        entities = [e for e in entities if q in atlas_text(e).lower()]
+    if str(params.get("excludeDeletedEntities", "true")).lower() == "true":
+        entities = [e for e in entities if e["status"] != "DELETED"]
+    if params.get("entityFilters"):
+        entities = atlas_filter(entities, params["entityFilters"])
+    return entities
+
+
+def atlas_page(entities, params, extra=None, attributes=None):
+    limit, offset = int(params.get("limit", 100) or 100), int(params.get("offset", 0) or 0)
+    page = entities[offset:offset + limit]
+    result = {"queryType": params.get("_queryType", "BASIC"), "searchParameters": {k: v for k, v in params.items() if not k.startswith("_")}, "approximateCount": len(entities), "entities": []}
+    for e in page:
+        header = {k: v for k, v in e.items() if k != "attributes"}
+        header["attributes"] = {k: v for k, v in e["attributes"].items() if k in {"qualifiedName", "name", "owner", "description", "createTime"} or (attributes and k in attributes)}
+        result["entities"].append(header)
+    return {**result, **(extra or {})}
+
+
+def atlas_dsl(entities, query):
+    """A small subset of the Atlas DSL: [from] <type> [where <attr> (=|!=|like) '<v>' [and ...] | isa <classification>] [select a, b] [limit n] [offset n]."""
+    text = query.strip()
+    match = _re.fullmatch(r"(?:from\s+)?(\w+)(?:\s+isa\s+(\w+))?(?:\s+where\s+(.+?))?(?:\s+select\s+([\w\s,]+?))?(?:\s+limit\s+(\d+))?(?:\s+offset\s+(\d+))?", text, _re.I | _re.S)
+    if not match:
+        return None
+    type_name, isa, where, select, limit, offset = match.groups()
+    entities = [e for e in entities if e["typeName"] == type_name and e["status"] != "DELETED"]
+    if isa:
+        entities = [e for e in entities if isa in e["classificationNames"]]
+    if where:
+        for clause in _re.split(r"\s+and\s+", where, flags=_re.I):
+            m = _re.fullmatch(r"(\w+)\s*(=|!=|like)\s*'([^']*)'", clause.strip(), _re.I)
+            if not m:
+                return None
+            attr, op, value = m.groups()
+            entities = atlas_filter(entities, {"attributeName": attr, "operator": op.lower(), "attributeValue": value})
+    columns = [c.strip() for c in select.split(",")] if select else None
+    return entities, columns, int(limit or 100), int(offset or 0)
+
+
+def atlas_relationship_view(rel):
+    e1, e2 = atlas_by_guid(rel["end1"]), atlas_by_guid(rel["end2"])
+    end = lambda e: {"guid": e["guid"], "typeName": e["typeName"], "uniqueAttributes": {"qualifiedName": e["attributes"]["qualifiedName"]}}
+    return {"guid": rel["guid"], "typeName": rel["typeName"], "status": rel["status"], "end1": end(e1), "end2": end(e2)}
+
+
+@app.api_route("/api/atlas/v2/{rest:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def atlas_direct(rest: str, request: Request):
+    return await atlas_api(rest, request, features=True)
+
+
+@app.api_route("/gateway/cdp-proxy-api/atlas/api/atlas/v2/{rest:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def atlas_knox(rest: str, request: Request):
+    return await atlas_api(rest, request, features=True)
+
+
+@app.api_route("/atlas-1/api/atlas/v2/{rest:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def atlas_old(rest: str, request: Request):
+    return await atlas_api(rest, request, features=False)
+
+
+async def atlas_api(rest, request, features):
+    user = atlas_user(request)
+    if user is None:
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Atlas"'}, content="Authentication required")
+    query = dict(request.query_params)
+    parts = rest.strip("/").split("/")
+    visible = atlas_visible(user)
+    if parts[0] != "search":
+        return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+    if not features and len(parts) > 1 and parts[1] in {"quick", "relations", "relationship", "suggestions"}:
+        return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+    if parts == ["search", "basic"] and request.method == "GET":
+        return atlas_page(atlas_basic(visible, query), query)
+    if parts == ["search", "basic"] and request.method == "POST":
+        body = await request.json()
+        if not isinstance(body, dict):
+            return atlas_error(400, "ATLAS-400-00-001", "Invalid search parameters")
+        return atlas_page(atlas_basic(visible, body), {**body, "_queryType": "BASIC"}, attributes=set(body.get("attributes") or []))
+    if parts == ["search", "attribute"]:
+        name, prefix = query.get("attrName", ""), query.get("attrValuePrefix", "")
+        if not name:
+            return atlas_error(400, "ATLAS-400-00-00C", "attrName is required")
+        entities = [e for e in visible if e["status"] != "DELETED" and str(e["attributes"].get(name, "")).lower().startswith(prefix.lower()) and (not query.get("typeName") or e["typeName"] == query["typeName"])]
+        return atlas_page(entities, {**query, "_queryType": "ATTRIBUTE"})
+    if parts == ["search", "dsl"]:
+        if not query.get("query") and not query.get("typeName"):
+            return atlas_error(400, "ATLAS-400-00-059", "Invalid DSL query: query or typeName is required")
+        text = query.get("query") or ""
+        if query.get("typeName") and not text.lower().startswith(("from", query["typeName"].lower())):
+            text = f"{query['typeName']} {text}".strip()
+        parsed = atlas_dsl(visible, text)
+        if parsed is None:
+            return atlas_error(400, "ATLAS-400-00-059", f"Invalid DSL query: [{text}] | Reason: expected <type> [where ...] [select ...]")
+        entities, columns, limit, offset = parsed
+        if query.get("classification"):
+            entities = [e for e in entities if query["classification"] in e["classificationNames"]]
+        limit, offset = int(query.get("limit") or limit), int(query.get("offset") or offset)
+        if columns:
+            rows = [[e["attributes"].get(c) if c not in ("typeName", "guid") else e[c] for c in columns] for e in entities[offset:offset + limit]]
+            return {"queryType": "DSL", "queryText": text, "attributes": {"name": columns, "values": rows}, "approximateCount": len(entities)}
+        return {**atlas_page(entities, {"limit": limit, "offset": offset, "_queryType": "DSL"}), "queryText": text}
+    if parts == ["search", "fulltext"]:
+        q = (query.get("query") or "").lower()
+        entities = [e for e in visible if q and q in atlas_text(e).lower()]
+        if str(query.get("excludeDeletedEntities", "true")).lower() == "true":
+            entities = [e for e in entities if e["status"] != "DELETED"]
+        return atlas_page(entities, {**query, "_queryType": "FULL_TEXT"}, {"fullTextResult": [{"entity": {"guid": e["guid"], "typeName": e["typeName"]}, "score": 1.0} for e in entities]})
+    if parts == ["search", "quick"]:
+        entities = atlas_basic(visible, query)
+        counts = {}
+        for e in entities:
+            counts[e["typeName"]] = counts.get(e["typeName"], 0) + 1
+        return {"searchResults": atlas_page(entities, {**query, "_queryType": "BASIC"}), "aggregationMetrics": {"__typeName": counts}}
+    if parts == ["search", "relations"]:
+        rels = [r for r in ATLAS_RELATIONSHIPS if (not query.get("relationshipName") or r["typeName"] == query["relationshipName"]) and atlas_by_guid(r["end1"]) in visible and atlas_by_guid(r["end2"]) in visible]
+        limit, offset = int(query.get("limit") or 100), int(query.get("offset") or 0)
+        return {"queryType": "RELATIONSHIP", "searchParameters": query, "approximateCount": len(rels), "relations": [atlas_relationship_view(r) for r in rels[offset:offset + limit]]}
+    if parts == ["search", "relationship"]:
+        guid, relation = query.get("guid", ""), query.get("relation", "")
+        entity = atlas_by_guid(guid)
+        if entity is None or entity not in visible:
+            return atlas_error(404, "ATLAS-404-00-005", f"Given instance guid {guid} is invalid/not found")
+        if not relation:
+            return atlas_error(400, "ATLAS-400-00-00C", "relation is required")
+        related = []
+        for r in ATLAS_RELATIONSHIPS:
+            if r["end1"] == guid and r["end1Attr"] == relation:
+                related.append(atlas_by_guid(r["end2"]))
+            if r["end2"] == guid and r["end2Attr"] == relation:
+                related.append(atlas_by_guid(r["end1"]))
+        related = [e for e in related if e in visible]
+        return atlas_page(related, {**query, "_queryType": "RELATIONSHIP"})
+    if parts == ["search", "saved"] and request.method == "GET":
+        owner = query.get("user") or user
+        if owner != user and user not in ("admin",):
+            return atlas_error(403, "ATLAS-403-00-001", f"{user} is not authorized to read saved searches of {owner}")
+        saved = [s for s in ATLAS_SAVED if s["ownerName"] == owner and (not query.get("searchType") or s["searchType"] == query["searchType"])]
+        return saved
+    if parts[:2] == ["search", "saved"] and len(parts) == 3 and request.method == "GET":
+        owner = query.get("user") or user
+        if owner != user and user != "admin":
+            return atlas_error(403, "ATLAS-403-00-001", f"{user} is not authorized to read saved searches of {owner}")
+        saved = next((s for s in ATLAS_SAVED if s["ownerName"] == owner and s["name"] == parts[2]), None)
+        return saved or atlas_error(404, "ATLAS-404-00-00E", f"Saved search '{parts[2]}' not found for user {owner}")
+    if parts[:3] == ["search", "saved", "execute"]:
+        if parts[3] == "guid":
+            saved = next((s for s in ATLAS_SAVED if s["guid"] == parts[4]), None)
+        else:
+            owner = query.get("user") or user
+            saved = next((s for s in ATLAS_SAVED if s["ownerName"] == owner and s["name"] == parts[3]), None)
+        if saved is None:
+            return atlas_error(404, "ATLAS-404-00-00E", f"Saved search {parts[-1]} not found")
+        if saved["ownerName"] != user and user != "admin":
+            return atlas_error(403, "ATLAS-403-00-001", f"{user} is not authorized to execute saved searches of {saved['ownerName']}")
+        if saved["searchType"] == "BASIC":
+            return atlas_page(atlas_basic(visible, saved["searchParameters"]), {**saved["searchParameters"], "_queryType": "BASIC"})
+        entities, columns, limit, offset = atlas_dsl(visible, saved["searchParameters"]["query"])
+        return {**atlas_page(entities, {"limit": limit, "offset": offset, "_queryType": "DSL"}), "queryText": saved["searchParameters"]["query"]}
+    if parts == ["search", "suggestions"]:
+        prefix, field = (query.get("prefixString") or "").lower(), query.get("fieldName") or "name"
+        values = sorted({str(e["attributes"].get(field, "")) for e in visible if e["status"] != "DELETED" and str(e["attributes"].get(field, "")).lower().startswith(prefix) and prefix})
+        return {"prefixString": query.get("prefixString", ""), "fieldName": field, "suggestions": values}
+    return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
