@@ -1,6 +1,6 @@
 # Daedalus implementation tracker
 
-Last updated: 2026-10-06.
+Last updated: 2026-10-30. What is left to do lives in [BURNDOWN.md](BURNDOWN.md); this file records what exists and how it was verified.
 
 **The four initial local Builder milestones and the multi-server deployment
 foundation are complete and locally verified.**
@@ -12,16 +12,11 @@ Status rules: **Verified** means the stated acceptance check passed;
 means additional implementation or qualification is required. Verification is
 limited to the behaviors listed, not exhaustive conformance.
 
-## Milestone burndown — 4 of 4 complete
+## Milestones
 
-- [x] **1. Local Docker environment** — PostgreSQL, migrations, mock REST APIs,
-  Builder API, Server/controller, and React development server.
-- [x] **2. Contracts and management foundation** — durable records, separate
-  layout, optimistic revisions, role checks, and input validation.
-- [x] **3. Persistent canvas authoring** — click/drag tool creation, inspector,
-  saved layout, search, list view, and browser reload persistence.
-- [x] **4. Testing and publication** — isolated tool tests, publish review,
-  verified activation, live reload, removal, rollback, and restart recovery.
+The four original local Builder milestones (Docker environment, contracts,
+canvas authoring, testing and publication) were completed on 2026-10-06. Everything
+since is tracked in [BURNDOWN.md](BURNDOWN.md).
 
 ## Feature inventory
 
@@ -88,6 +83,7 @@ limited to the behaviors listed, not exhaustive conformance.
 | Deployment provider interface with docker and kubernetes providers | Verified locally | `factory.providers`: manual, docker (Engine API; container per server, label-based adoption, stable host port), kubernetes (Deployment + Service per server, merge-patch redeploy, scale-to-zero stop), cloudera-ai, cloudera-bridge behind one interface; the workspace carries provider facts and the Deploy dialog is provider-neutral. Tests drive docker and kubernetes against fakes of their APIs. Both also ran for real: the docker provider against the local daemon (container joined the dev stack and came online), the kubernetes provider with the Builder itself running in a kind cluster from `deploy/kubernetes/builder.yaml` (Deploy created the Deployment and Service, the Server came online and answered `tools/list` through the Service, Stop scaled to zero, Delete removed both objects, and the default workspace was emptied). That run found that `runAsNonRoot` needs a numeric user in the image, so the Dockerfile now ends with `USER 10001:10001`. |
 | Platform-neutral configuration and generic container image | Verified locally | Services read `FACTORY_*` and `DATABASE_URL` only; `deploy/workbench/workbench_env.py` translates `CDSW_*` and the project Postgres host file for the Workbench launchers; `deploy/container/Dockerfile` (python:3.12-slim, UI built in a Node stage, agentgateway pinned for amd64 and arm64, revision baked in) with `builder`/`server`/`migrate` entrypoint and a reference compose. Tests cover the adapter and that settings ignore `CDSW_*`. The Builder deploys Servers itself through the docker and kubernetes providers (next row). UI wording is provider-neutral: messages name what the provider creates (container, Deployment, Workbench application) or say "process" in manual mode. |
 | Packs in the registry and seed packs | Verified locally | Project packs stored in `packs`, seed enablement in `pack_settings` (environment default `FACTORY_PACKS_ENABLED`, administrator toggle overrides), inspection cached by digest in `pack_inspections`; the executor imports release snapshots from memory; rollback uses the release's own pack code; legacy pack files imported once; launcher log files opt-in. Backend tests cover enable/disable/fork/revert, environment bootstrap, cache, legacy import, export/import of seeds; browser test toggles a seed. |
+| WebHDFS admin seed pack | Verified locally | `webhdfs_admin` (first catalogue seed, 26 tools): content summary, quota usage, filesystem status, checksum, paged listing, home and trash directories, permission, owner, ACL status, access check, replication, storage policy, set times, extended attributes, snapshots (list snapshottable, list, diff, create, rename, delete), append and concat. The in-memory WebHDFS fake gained every operation (including redirecting APPEND on the NameNode path and snapshot state). `tests/test_webhdfs_admin.py` drives all 26 through the executor against the fake; real HttpFS/Knox verification pending the customer environment. |
 | Server deletion | Verified locally | Administrator-only header action with a type-the-name confirmation and Export-first option; deletes tools, connections, origins, layout, releases and the deployment record (packs kept), optionally deletes what the provider created (container, Deployment, Workbench application) or, when that is kept, requires it to be stopped first; refuses while another Server process serves the server; empties the default workspace instead of removing it (`server.empty`) and audits `server.delete`. Backend tests (including a fake Workbench: running refused, stopped allowed, deleted with the server) and a browser test. |
 | Individual MCP tools | Verified locally | `kind: mcp` tools pick single tools from an `mcp` connection, with local name, description and effect; schema copied from discovery server-side; executed by the executor's MCP client with latest-profile and session-based fallback, connection credentials and caller identity; JSON-text results returned as structured data; agentgateway body nesting unwrapped. Tested against an SDK server on 2025-11-25 and a Daedalus server on 2026-07-28. |
 
@@ -114,22 +110,10 @@ The previous automatic approval interruption was resolved on retry. The earlier
 release was confirmed active; publication, recovery, and browser verification
 are no longer blocked.
 
-## Remaining developer-plan work
+## Remaining work
 
-- [ ] Deploy and qualify the two applications in actual Cloudera Workbench.
-- [ ] Install/configure and qualify the versioned Cloudera deployment bridge for
-  this Workbench environment, then create a dedicated Server Application from
-  Builder and exercise deploy/refresh/stop/delete against it.
-- [ ] Verify Workbench ingress, registration, and protocol behavior; record exact
-  deployment versions and immutable runtime image digest in `compatibility.yaml`.
-- [ ] Production OAuth/OIDC and per-tool caller authorization.
-- [ ] Backend credential/secret providers and enterprise network enforcement.
-- [ ] General OpenAPI import and additional REST/schema mapping profiles.
-- [ ] Full modern/legacy MCP conformance and ingress failure-path qualification.
-- [ ] Broader concurrent-writer, response-boundary, and audit-event tests.
-- [ ] Full keyboard/accessibility coverage and browser checks for custom operation
-  authoring, edge reconnection, and connection editing.
-- [ ] SBOM and vulnerability qualification for the deployed artifact.
+See [BURNDOWN.md](BURNDOWN.md). The developer-plan items that are still open are
+listed there under "Hardening carried over from the developer plan".
 
 This first slice supports one logical server, unauthenticated backend connections,
 GET/POST JSON REST tools, scalar path/query parameters, and a restricted object

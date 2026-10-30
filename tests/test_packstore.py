@@ -20,7 +20,7 @@ def test_seed_packs_ship_disabled_and_the_catalog_lists_only_what_is_enabled(reg
     assert "webhdfs_admin" in packs.seed_names() and "webhdfs_admin" not in names(client)
     seeds = client.get("/api/packs/seeds").json()
     seed = next(s for s in seeds["seeds"] if s["name"] == "webhdfs_admin")
-    assert seed == {**seed, "enabled": False, "configured_by": "default", "protocol": "webhdfs", "tools": 5, "shadowed": False, "seed_updated": False, "error": None}
+    assert seed == {**seed, "enabled": False, "configured_by": "default", "protocol": "webhdfs", "tools": 26, "shadowed": False, "seed_updated": False, "error": None}
     assert client.get("/api/packs/webhdfs_admin").status_code == 404
     assert client.put("/api/packs/webhdfs_admin/enabled", headers=ADMIN_ONLY, json={"enabled": True}).status_code == 403
     assert client.put("/api/packs/nope/enabled", json={"enabled": True}).status_code == 404
@@ -28,7 +28,7 @@ def test_seed_packs_ship_disabled_and_the_catalog_lists_only_what_is_enabled(reg
     assert enabled.status_code == 200 and next(s for s in enabled.json()["seeds"] if s["name"] == "webhdfs_admin")["configured_by"] == "setting"
     assert names(client) == ["demo", "hdfs", "rest", "s3", "webhdfs_admin"]
     info = client.get("/api/packs/webhdfs_admin").json()
-    assert info["origin"] == "seed" and info["editable"] and info["enabled"] and [t["function"] for t in info["tools"]] == ["get_content_summary", "get_checksum", "set_permission", "set_owner", "set_replication"]
+    assert info["origin"] == "seed" and info["editable"] and info["enabled"] and len(info["tools"]) == 26 and {t["function"] for t in info["tools"]} >= {"get_content_summary", "set_owner", "create_snapshot", "append", "concat"}
     assert "def get_content_summary" in info["source"]
     assert client.put("/api/packs/webhdfs_admin/enabled", json={"enabled": False}).status_code == 200
     assert "webhdfs_admin" not in names(client)

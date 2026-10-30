@@ -3,8 +3,8 @@
 Every documented REST operation across Cloudera's products, grouped into proposed Daedalus tool packs with one tool per API operation.
 Extracted by script from Cloudera's published specs and reference pages on 2026-10-20; recovered into this folder on 2026-10-29.
 
-**Working file for triage:** [cloudera-api-tools.csv](cloudera-api-tools.csv) has one row per tool with a blank `decision` column
-(suggested values: `keep`, `deprecated`, `later`, `skip`) and a `notes` column. `deprecated_upstream` is what the vendor spec itself
+**Working file for triage:** [cloudera-api-tools.csv](cloudera-api-tools.csv) has one row per tool with a filled `decision` column
+(`keep`, `deprecated`, `later`, `skip`; see Decisions below) and a `notes` column. `deprecated_upstream` is what the vendor spec itself
 marks deprecated; `in_builtin_pack` marks operations the existing `hdfs` and `s3` packs already cover; `partial_source` marks packs whose
 list came from HTML reference pages rather than a machine-readable spec and may be missing operations.
 
@@ -22,6 +22,34 @@ Assumes every solution is deployed as a Cloudera AI Workbench application. The `
 | B admin surface | 23 | 869 | Reachable, but administrative write surfaces unsuitable for an MCP acting as an analyst: Ranger and Atlas administration, Kafka operations, NiFi and SSB administration, Flink cluster control |
 | C out of scope | 23 | 834 | Fine in Workbench, not part of the lakehouse file and table goal: NiFi flows, streaming SQL, Solr, HBase, DataFlow, Operational Database, Replication Manager |
 | candidate | 15 | 650 | The realistic Daedalus backlog: WebHDFS, Ozone S3 and Recon, Atlas catalog reads, Ranger reads, Data Warehouse lifecycle, Iceberg optimisation, Data Catalog, Workbench API, CDE jobs. Applying "reads plus the few writes the use case needs" takes this to roughly 250-300 tools |
+
+## Decisions (first pass, 2026-10-30)
+
+The `decision` column is filled for every row. Buckets A, B and C are `skip`. For the 650 candidates: `keep` is reads plus the writes file management needs,
+`later` is what the customer may ask for in phase 2 (tables, catalog tagging, Data Warehouse, Data Engineering, the Workbench API), `skip` is administration,
+duplicates and plumbing, and `deprecated` follows the vendor spec. The `notes` column gives the reason per tool. Tools the built-in `hdfs` and `s3` packs or the
+`webhdfs_admin` seed pack already provide are `keep` with a note saying so.
+
+| Pack | keep | later | skip | deprecated |
+|---|---|---|---|---|
+| `atlas_discovery` | 13 | 3 | 8 | 0 |
+| `atlas_entities` | 13 | 14 | 18 | 0 |
+| `atlas_glossary` | 13 | 3 | 16 | 0 |
+| `atlas_types` | 5 | 11 | 4 | 0 |
+| `cde_jobs` | 0 | 70 | 0 | 2 |
+| `cdp_datacatalog` | 4 | 17 | 0 | 0 |
+| `cdp_dw` | 0 | 88 | 0 | 1 |
+| `cdp_lakehouseopt` | 14 | 15 | 1 | 0 |
+| `cml_workbench_admin` | 0 | 32 | 0 | 0 |
+| `cml_workbench_models` | 0 | 41 | 0 | 0 |
+| `cml_workbench_projects` | 0 | 33 | 0 | 0 |
+| `ozone_recon` | 13 | 5 | 31 | 1 |
+| `ozone_s3` | 12 | 4 | 10 | 0 |
+| `ranger_public` | 31 | 1 | 39 | 0 |
+| `webhdfs` | 33 | 19 | 12 | 0 |
+| **total** | **151** | **356** | **139** | **4** |
+
+So the Daedalus backlog is **151 tools** across 10 packs, of which 40 already exist in the `hdfs` and `s3` packs and the `webhdfs_admin` seed (the seed grew from 5 to 26 tools on 2026-10-30, completing the `webhdfs` pack; see `docs/BURNDOWN.md`).
 
 ## CDP Public Cloud control plane
 

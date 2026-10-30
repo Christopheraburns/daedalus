@@ -105,7 +105,9 @@ def counters():
 # In-memory HDFS for tests and the playground. /webhdfs/v1 behaves like HttpFS (data
 # flows directly); /webhdfs-nn/v1 behaves like a NameNode (OPEN and CREATE answer with a
 # 307 redirect to the HttpFS path, as a real NameNode redirects to a DataNode).
+import base64
 import hashlib
+import json
 import time
 from fastapi import Response
 from fastapi.responses import JSONResponse
@@ -118,11 +120,13 @@ def fs_entry(kind, content=b"", owner="hdfs"):
 
 
 fs = {"/": fs_entry("DIRECTORY"), "/data": fs_entry("DIRECTORY"), "/data/readme.txt": fs_entry("FILE", b"Hello from the HDFS fixture.\n")}
+snapshottable = {"/data"}  # directories on which snapshots may be taken (hdfs dfsadmin -allowSnapshot)
+snapshots = {}  # (directory, name) -> {path: entry} copy of the subtree when the snapshot was taken
 
 
 def fs_status(entry, suffix):
     directory = entry["type"] == "DIRECTORY"
-    return {"pathSuffix": suffix, "type": entry["type"], "length": 0 if directory else len(entry["content"]), "modificationTime": entry["mtime"], "accessTime": entry["mtime"],
+    return {"pathSuffix": suffix, "type": entry["type"], "length": 0 if directory else len(entry["content"]), "modificationTime": entry["mtime"], "accessTime": entry.get("atime", entry["mtime"]),
         "owner": entry["owner"], "group": entry.get("group", "supergroup"), "permission": entry.get("permission", "755" if directory else "644"),
         "replication": 0 if directory else entry.get("replication", 1), "blockSize": 0 if directory else 134217728}
 
@@ -155,8 +159,8 @@ async def webhdfs_operation(raw_path, request, redirects):
     op = query.get("op", "").upper()
     user = query.get("user.name", "anonymous")
     path = "/" + raw_path.strip("/") if raw_path.strip("/") else "/"
-    body = await request.body() if request.method == "PUT" else b""
-    if redirects and op in {"OPEN", "CREATE"} and query.get("data") != "true":
+    body = await request.body() if request.method in {"PUT", "POST"} else b""
+    if redirects and op in {"OPEN", "CREATE", "APPEND"}:  # a NameNode always redirects data operations to a DataNode
         location = str(request.base_url).rstrip("/") + "/webhdfs/v1" + path + "?" + "&".join(f"{k}={v}" for k, v in {**dict(query), "data": "true"}.items())
         return Response(status_code=307, headers={"Location": location})
     with fs_lock:
@@ -195,6 +199,9 @@ async def webhdfs_operation(raw_path, request, redirects):
                 return remote_exception(403, "PathIsNotEmptyDirectoryException", f"`{path} is non empty': Directory is not empty")
             for key in [p for p in fs if p == path or p.startswith(path.rstrip("/") + "/")]:
                 del fs[key]
+                snapshottable.discard(key)
+                for snapshot in [k for k in snapshots if k[0] == key]:
+                    del snapshots[snapshot]
             return {"boolean": True}
         if op == "OPEN":
             if entry is None or entry["type"] != "FILE":
@@ -236,4 +243,161 @@ async def webhdfs_operation(raw_path, request, redirects):
         if op == "SETREPLICATION":
             entry["replication"] = int(query.get("replication", 1))
             return {"boolean": True}
-        return remote_exception(400, "UnsupportedOperationException", f"Unsupported operation: {op}")
+        return webhdfs_extra(op, path, entry, query, body, user)
+
+
+def fs_subtree(path):
+    return {p: dict(e) for p, e in fs.items() if p == path or p.startswith(path.rstrip("/") + "/")}
+
+
+def xattr_decode(value):
+    """WebHDFS encodes xattr values as "text", 0x<hex> or 0s<base64>."""
+    if value.startswith("0x"):
+        return bytes.fromhex(value[2:])
+    if value.startswith("0s"):
+        return base64.b64decode(value[2:])
+    return value.strip('"').encode()
+
+
+def xattr_encode(value, encoding):
+    return {"hex": "0x" + value.hex(), "base64": "0s" + base64.b64encode(value).decode()}.get(encoding, '"' + value.decode(errors="replace") + '"')
+
+
+def webhdfs_extra(op, path, entry, query, body, user):
+    """The operations the webhdfs_admin seed pack adds; called under fs_lock."""
+    missing = remote_exception(404, "FileNotFoundException", f"File does not exist: {path}")
+    if op == "GETHOMEDIRECTORY":
+        return {"Path": f"/user/{user}"}
+    if op == "GETTRASHROOT":
+        return {"Path": f"/user/{user}/.Trash"}
+    if op == "GETSTATUS":
+        used = sum(len(e["content"]) for e in fs.values() if e["type"] == "FILE")
+        return {"FsStatus": {"capacity": 10 ** 12, "used": used, "remaining": 10 ** 12 - used}}
+    if op == "GETSNAPSHOTTABLEDIRECTORYLIST":
+        return {"SnapshottableDirectoryList": [{"dirStatus": fs_status(fs[d], d.rsplit("/", 1)[1]), "parentFullPath": fs_parent(d),
+            "snapshotNumber": len([k for k in snapshots if k[0] == d]), "snapshotQuota": 65536} for d in sorted(snapshottable) if d in fs]}
+    if op == "CONCAT":
+        sources = [s for s in query.get("sources", "").split(",") if s]
+        if entry is None or entry["type"] != "FILE":
+            return missing
+        for source in sources:
+            if fs.get(source, {}).get("type") != "FILE":
+                return remote_exception(404, "FileNotFoundException", f"File does not exist: {source}")
+            if fs_parent(source) != fs_parent(path):
+                return remote_exception(403, "HadoopIllegalArgumentException", "Sources and target must be in the same directory")
+        for source in sources:
+            entry["content"] += fs.pop(source)["content"]
+        return Response(status_code=200)
+    if entry is None:
+        return missing
+    if op == "LISTSTATUS_BATCH":
+        children = fs_children(path) if entry["type"] == "DIRECTORY" else [path]
+        after = query.get("startAfter", "")
+        if after:
+            children = [c for c in children if c.rsplit("/", 1)[1] > after]
+        page, rest = children[:2], children[2:]  # tiny pages so paging is exercised
+        statuses = [fs_status(fs[c], c.rsplit("/", 1)[1] if c != path else "") for c in page]
+        return {"DirectoryListing": {"partialListing": {"FileStatuses": {"FileStatus": statuses}}, "remainingEntries": len(rest)}}
+    if op == "GETQUOTAUSAGE":
+        keys = fs_subtree(path)
+        length = sum(len(e["content"]) for e in keys.values() if e["type"] == "FILE")
+        return {"QuotaUsage": {"fileAndDirectoryCount": len(keys), "quota": entry.get("quota", -1), "spaceConsumed": length, "spaceQuota": entry.get("space_quota", -1),
+            "typeQuota": {}}}
+    if op == "GETXATTRS":
+        names = query.getlist("xattr.name") if hasattr(query, "getlist") else [n for n in [query.get("xattr.name")] if n]
+        attrs = entry.setdefault("xattrs", {})
+        for name in names:
+            if name not in attrs:
+                return remote_exception(403, "IOException", f"At least one of the attributes provided was not found: {name}")
+        chosen = names or sorted(attrs)
+        return {"XAttrs": [{"name": n, "value": xattr_encode(attrs[n], query.get("encoding", "text"))} for n in chosen]}
+    if op == "LISTXATTRS":
+        return {"XAttrNames": json.dumps(sorted(entry.get("xattrs", {})))}
+    if op == "SETXATTR":
+        name, flag = query.get("xattr.name", ""), query.get("flag", "CREATE")
+        attrs = entry.setdefault("xattrs", {})
+        if not name.split(".")[0] in {"user", "trusted", "security", "system", "raw"}:
+            return remote_exception(400, "HadoopIllegalArgumentException", f"An XAttr name must be prefixed with user/trusted/security/system/raw: {name}")
+        if flag == "CREATE" and name in attrs:
+            return remote_exception(403, "IOException", f"XAttr: {name} already exists. The REPLACE flag must be specified.")
+        if flag == "REPLACE" and name not in attrs:
+            return remote_exception(403, "IOException", f"XAttr: {name} does not exist. The CREATE flag must be specified.")
+        attrs[name] = xattr_decode(query.get("xattr.value", ""))
+        return Response(status_code=200)
+    if op == "REMOVEXATTR":
+        name = query.get("xattr.name", "")
+        if name not in entry.get("xattrs", {}):
+            return remote_exception(403, "IOException", f"No matching attributes found for remove operation: {name}")
+        del entry["xattrs"][name]
+        return Response(status_code=200)
+    if op == "GETACLSTATUS":
+        return {"AclStatus": {"entries": entry.get("acl", []), "group": entry.get("group", "supergroup"), "owner": entry["owner"],
+            "permission": entry.get("permission", "755" if entry["type"] == "DIRECTORY" else "644"), "stickyBit": False}}
+    if op == "CHECKACCESS":
+        wanted = query.get("fsaction", "---")
+        bits = int(entry.get("permission", "755" if entry["type"] == "DIRECTORY" else "644")[-3:], 8)
+        mine = bits >> 6 if entry["owner"] == user else bits & 7  # owner or "other"; the fake knows no groups
+        allowed = "".join(c if mine & (4 >> i) else "-" for i, c in enumerate("rwx"))
+        if any(w != "-" and a == "-" for w, a in zip(wanted, allowed)):
+            return remote_exception(403, "AccessControlException", f"Permission denied: user={user}, access={wanted}, inode=\"{path}\":{entry['owner']}:supergroup")
+        return Response(status_code=200)
+    if op == "GETSTORAGEPOLICY":
+        return {"BlockStoragePolicy": {"copyOnCreateFile": False, "creationFallbacks": [], "id": 7, "name": entry.get("storage_policy", "HOT"), "replicationFallbacks": ["ARCHIVE"], "storageTypes": ["DISK"]}}
+    if op == "SETTIMES":
+        mtime, atime = int(query.get("modificationtime", -1)), int(query.get("accesstime", -1))
+        if mtime >= 0:
+            entry["mtime"] = mtime
+        if atime >= 0:
+            entry["atime"] = atime
+        return Response(status_code=200)
+    if op == "APPEND":
+        if entry["type"] != "FILE":
+            return remote_exception(404, "FileNotFoundException", f"Path is not a file: {path}")
+        entry["content"] += body
+        return Response(status_code=200)
+    if op in {"CREATESNAPSHOT", "RENAMESNAPSHOT", "DELETESNAPSHOT", "GETSNAPSHOTLIST", "GETSNAPSHOTDIFF", "ALLOWSNAPSHOT", "DISALLOWSNAPSHOT"}:
+        if entry["type"] != "DIRECTORY":
+            return remote_exception(403, "SnapshotException", f"Not a directory: {path}")
+        if op == "ALLOWSNAPSHOT":
+            snapshottable.add(path)
+            return Response(status_code=200)
+        if op == "DISALLOWSNAPSHOT":
+            snapshottable.discard(path)
+            return Response(status_code=200)
+        if path not in snapshottable:
+            return remote_exception(403, "SnapshotException", f"Directory is not a snapshottable directory: {path}")
+        name, old = query.get("snapshotname", ""), query.get("oldsnapshotname", "")
+        mine = {k[1]: v for k, v in snapshots.items() if k[0] == path}
+        if op == "CREATESNAPSHOT":
+            name = name or time.strftime("s%Y%m%d-%H%M%S.000")
+            if name in mine:
+                return remote_exception(403, "SnapshotException", f"Failed to add snapshot: there is already a snapshot with the same name \"{name}\".")
+            snapshots[(path, name)] = fs_subtree(path)
+            return {"Path": f"{path.rstrip('/')}/.snapshot/{name}"}
+        if op == "GETSNAPSHOTLIST":
+            return {"SnapshotList": [{"dirStatus": fs_status(fs[path], ""), "fullPath": f"{path.rstrip('/')}/.snapshot/{n}", "snapshotID": i, "snapshotStatus": "ACTIVE"}
+                for i, n in enumerate(sorted(mine))]}
+        if op == "GETSNAPSHOTDIFF" and name in {"", "."}:
+            mine["."] = fs_subtree(path)  # "." compares against the current contents
+            name = "."
+        if name not in mine and op != "RENAMESNAPSHOT":
+            return remote_exception(403, "SnapshotException", f"Cannot find snapshot {name} in {path}")
+        if op == "DELETESNAPSHOT":
+            del snapshots[(path, name)]
+            return Response(status_code=200)
+        if op == "RENAMESNAPSHOT":
+            if old not in mine:
+                return remote_exception(403, "SnapshotException", f"The snapshot {old} does not exist for directory {path}")
+            if name in mine:
+                return remote_exception(403, "SnapshotException", f"The snapshot {name} already exists for directory {path}")
+            snapshots[(path, name)] = snapshots.pop((path, old))
+            return Response(status_code=200)
+        if op == "GETSNAPSHOTDIFF":
+            if old not in mine:
+                return remote_exception(403, "SnapshotException", f"Cannot find snapshot {old} in {path}")
+            before, after = mine[old], mine[name]
+            diffs = [{"sourcePath": p[len(path.rstrip("/")):] or "/", "targetPath": "", "type": "CREATE"} for p in after if p not in before]
+            diffs += [{"sourcePath": p[len(path.rstrip("/")):] or "/", "targetPath": "", "type": "DELETE"} for p in before if p not in after]
+            diffs += [{"sourcePath": p[len(path.rstrip("/")):] or "/", "targetPath": "", "type": "MODIFY"} for p in after if p in before and after[p].get("content") != before[p].get("content")]
+            return {"SnapshotDiffReport": {"diffList": sorted(diffs, key=lambda d: (d["type"], d["sourcePath"])), "fromSnapshot": old, "snapshotRoot": path, "toSnapshot": name}}
+    return remote_exception(400, "UnsupportedOperationException", f"Unsupported operation: {op}")

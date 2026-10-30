@@ -411,7 +411,18 @@ Packs come from three places. *Built-in* packs ship in the runtime image and are
 read-only. *Seed* packs (`services/factory/seedpacks/`) ship in the code too but
 are inert until enabled: set `FACTORY_PACKS_ENABLED=webhdfs_admin,...` on the
 Builder application, or switch them on in TOOL PACKS → ⚙ *Seed packs* (a toggle
-stored in the registry overrides the environment per pack). Editing a seed makes a
+stored in the registry overrides the environment per pack). This is how every
+pack from the API catalogue ships (see `docs/BURNDOWN.md`): all of them in the
+image, none active until an administrator wants it, and a published server
+carries only the tools on its canvas. The first seed, `webhdfs_admin`, completes
+WebHDFS coverage with 26 tools: content summary, quota usage, filesystem status,
+checksums, paged listing of large directories, home and trash directories,
+permissions, owner, ACL status, access checks, replication, storage policy,
+timestamps, extended attributes (list, get, set, remove), snapshots (list
+snapshottable directories, list, diff, create, rename, delete), append and
+concat. Appending through a NameNode-style endpoint follows the DataNode
+redirect only with `follow_redirects` in the tool configuration, as in the
+`hdfs` pack; allowing snapshots on a directory stays an administrator's job. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored

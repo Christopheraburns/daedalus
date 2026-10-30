@@ -815,7 +815,7 @@ test('an administrator switches a seed pack on and its tools appear in the palet
   await palette.getByRole('button', { name: 'Seed packs' }).click();
   const dialog = page.getByRole('dialog', { name: 'Seed packs' });
   const card = dialog.locator('.seed-card', { hasText: 'webhdfs_admin' });
-  await expect(card).toContainText('5 tools');
+  await expect(card).toContainText('26 tools');
   if (await card.getByRole('checkbox').isChecked()) { await card.getByRole('checkbox').uncheck(); await expect(page.locator('.message-bar')).toContainText('Seed pack webhdfs_admin is off.'); }
   await card.getByRole('checkbox').check();
   await expect(page.locator('.message-bar')).toContainText('Seed pack webhdfs_admin is on');
