@@ -14,7 +14,7 @@ nobody asked for. Each pack below is one seed, tested against a fake of its API
 in the mock service, with real-endpoint verification recorded when the customer
 environment allows it.
 
-## 1. Tool packs to ship as seeds (151 `keep` tools, 19 already provided)
+## 1. Tool packs to ship as seeds (151 `keep` tools, 45 provided so far)
 
 Order follows the customer's goal: files first, then who-may-see-what, then the
 catalogue, then Ozone inventory and table maintenance.
@@ -22,7 +22,7 @@ catalogue, then Ozone inventory and table maintenance.
 | # | Seed pack | Tools | Source API | State |
 |---|---|---|---|---|
 | 1 | `webhdfs_admin` | 21 new (33 keep, 12 in `hdfs` and the seed) | WebHDFS / HttpFS | [x] 2026-10-30: paging, quotas, home and trash, xattrs, ACL and access checks, storage policy, snapshots (list, diff, create, rename, delete), set times, append, concat, filesystem status |
-| 2 | `ozone_s3` extras | 4 new (12 keep, 8 in `s3`) | Ozone S3 Gateway | [ ] head_bucket, delete_objects, object tagging get/put/delete |
+| 2 | `s3_extras` | 5 new (12 keep, 7 in `s3`) | Ozone S3 Gateway | [x] 2026-10-30: bucket access check, bulk delete, object tags (get, set with merge or replace, delete all or named) |
 | 3 | `ranger_public` | 31 | Ranger public API v2 | [ ] read-only: policies, roles, services, service defs, security zones |
 | 4 | `atlas_discovery` | 13 | Atlas v2 search | [ ] basic, DSL, full-text, quick, attribute, relationship, saved searches, suggestions |
 | 5 | `atlas_entities` | 13 | Atlas v2 entity and lineage | [ ] by guid, by unique attribute, headers, classifications, audit, lineage, relationships |

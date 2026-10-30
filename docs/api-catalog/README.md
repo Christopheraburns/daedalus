@@ -49,7 +49,7 @@ duplicates and plumbing, and `deprecated` follows the vendor spec. The `notes` c
 | `webhdfs` | 33 | 19 | 12 | 0 |
 | **total** | **151** | **356** | **139** | **4** |
 
-So the Daedalus backlog is **151 tools** across 10 packs, of which 40 already exist in the `hdfs` and `s3` packs and the `webhdfs_admin` seed (the seed grew from 5 to 26 tools on 2026-10-30, completing the `webhdfs` pack; see `docs/BURNDOWN.md`).
+So the Daedalus backlog is **151 tools** across 10 packs, of which 45 already exist in the `hdfs` and `s3` packs and the `webhdfs_admin` and `s3_extras` seeds (both completed on 2026-10-30, closing the `webhdfs` and `ozone_s3` packs; see `docs/BURNDOWN.md`).
 
 ## CDP Public Cloud control plane
 

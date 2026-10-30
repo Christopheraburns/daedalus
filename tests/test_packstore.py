@@ -51,7 +51,7 @@ def test_inspection_runs_once_per_distinct_source(registry, monkeypatch):
     settings.packs_enabled.append("webhdfs_admin")
     for _ in range(3):
         client.get("/api/packs"); client.get("/api/packs/seeds"); client.get("/api/packs/webhdfs_admin")
-    assert calls == ["webhdfs_admin"]
+    assert sorted(calls) == sorted(packs.seed_names())  # every seed once, for the seeds listing; never again
     with sessions() as session:
         assert session.get(PackInspection, packs.digest_of(packs.seed_source("webhdfs_admin"))) is not None
 

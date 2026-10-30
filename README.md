@@ -422,7 +422,12 @@ timestamps, extended attributes (list, get, set, remove), snapshots (list
 snapshottable directories, list, diff, create, rename, delete), append and
 concat. Appending through a NameNode-style endpoint follows the DataNode
 redirect only with `follow_redirects` in the tool configuration, as in the
-`hdfs` pack; allowing snapshots on a directory stays an administrator's job. Editing a seed makes a
+`hdfs` pack; allowing snapshots on a directory stays an administrator's job.
+The second seed, `s3_extras`, adds to the `s3` pack what the catalogue kept from
+the Ozone S3 Gateway: a bucket access check, deleting up to 1,000 objects in one
+request, and object tags (read, set with merge or replace, remove named tags or
+all). Both seeds are tested against the same fakes as the built-in packs
+(the in-memory WebHDFS in `mock-api`, the SeaweedFS S3 gateway). Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored
