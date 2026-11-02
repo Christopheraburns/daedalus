@@ -723,7 +723,20 @@ ATLAS_ENTITIES = [
     atlas_entity("col-salary", "hive_column", "finance.payroll.salary@cm", "salary", "bob", classifications=["PII"], type="decimal(12,2)"),
     atlas_entity("path-shared", "hdfs_path", "/data/shared@cm", "shared", "hdfs", path="/data/shared"),
     atlas_entity("term-customer", "AtlasGlossaryTerm", "Customer@Business", "Customer", "steward", shortDescription="A person or organisation that buys from us"),
+    atlas_entity("tbl-order-summary", "hive_table", "sales.order_summary@cm", "order_summary", "alice", description="Daily order totals", tableType="MANAGED_TABLE"),
+    atlas_entity("proc-load-orders", "hive_process", "sales.etl.load_orders@cm", "load_orders", "etl", description="Loads /data/shared files into sales.orders", queryText="LOAD DATA INPATH '/data/shared' INTO TABLE sales.orders"),
+    atlas_entity("proc-summarise", "hive_process", "sales.etl.summarise_orders@cm", "summarise_orders", "etl", description="Aggregates orders per day", queryText="INSERT OVERWRITE TABLE sales.order_summary SELECT ..."),
 ]
+ATLAS_LINEAGE = [("path-shared", "proc-load-orders"), ("proc-load-orders", "tbl-orders"), ("tbl-orders", "proc-summarise"), ("proc-summarise", "tbl-order-summary")]  # (input, output) edges
+ATLAS_AUDIT = {
+    "tbl-customers": [
+        {"eventKey": "tbl-customers:1760000000000", "timestamp": 1760000000000, "user": "atlas-sync", "action": "ENTITY_CREATE", "details": "Created: hive_table sales.customers@cm"},
+        {"eventKey": "tbl-customers:1760003600000", "timestamp": 1760003600000, "user": "steward", "action": "CLASSIFICATION_ADD", "details": "Added classification: PII"},
+        {"eventKey": "tbl-customers:1760007200000", "timestamp": 1760007200000, "user": "steward", "action": "TERM_ADD", "details": "Added term: Customer"},
+    ],
+    "tbl-payroll": [{"eventKey": "tbl-payroll:1760000000000", "timestamp": 1760000000000, "user": "atlas-sync", "action": "ENTITY_CREATE", "details": "Created: hive_table finance.payroll@cm"}],
+}
+ATLAS_CLASSIFICATION_ATTRIBUTES = {("tbl-payroll", "Confidential"): {"level": "high"}, ("col-salary", "PII"): {"type": "salary"}}
 ATLAS_RELATIONSHIPS = [
     {"guid": "rel-1", "typeName": "hive_table_db", "status": "ACTIVE", "end1": "tbl-orders", "end2": "db-sales", "end1Attr": "db", "end2Attr": "tables"},
     {"guid": "rel-2", "typeName": "hive_table_db", "status": "ACTIVE", "end1": "tbl-customers", "end2": "db-sales", "end1Attr": "db", "end2Attr": "tables"},
@@ -731,6 +744,11 @@ ATLAS_RELATIONSHIPS = [
     {"guid": "rel-4", "typeName": "hive_table_columns", "status": "ACTIVE", "end1": "tbl-customers", "end2": "col-email", "end1Attr": "columns", "end2Attr": "table"},
     {"guid": "rel-5", "typeName": "hive_table_columns", "status": "ACTIVE", "end1": "tbl-payroll", "end2": "col-salary", "end1Attr": "columns", "end2Attr": "table"},
     {"guid": "rel-6", "typeName": "AtlasGlossarySemanticAssignment", "status": "ACTIVE", "end1": "term-customer", "end2": "tbl-customers", "end1Attr": "assignedEntities", "end2Attr": "meanings"},
+    {"guid": "rel-7", "typeName": "hive_table_db", "status": "ACTIVE", "end1": "tbl-order-summary", "end2": "db-sales", "end1Attr": "db", "end2Attr": "tables"},
+    {"guid": "rel-8", "typeName": "dataset_process_inputs", "status": "ACTIVE", "end1": "proc-load-orders", "end2": "path-shared", "end1Attr": "inputs", "end2Attr": "inputToProcesses"},
+    {"guid": "rel-9", "typeName": "process_dataset_outputs", "status": "ACTIVE", "end1": "proc-load-orders", "end2": "tbl-orders", "end1Attr": "outputs", "end2Attr": "outputFromProcesses"},
+    {"guid": "rel-10", "typeName": "dataset_process_inputs", "status": "ACTIVE", "end1": "proc-summarise", "end2": "tbl-orders", "end1Attr": "inputs", "end2Attr": "inputToProcesses"},
+    {"guid": "rel-11", "typeName": "process_dataset_outputs", "status": "ACTIVE", "end1": "proc-summarise", "end2": "tbl-order-summary", "end1Attr": "outputs", "end2Attr": "outputFromProcesses"},
 ]
 ATLAS_SAVED = [
     {"guid": "ss-1", "name": "PII tables", "ownerName": "admin", "searchType": "BASIC", "searchParameters": {"typeName": "hive_table", "classification": "PII", "excludeDeletedEntities": True, "limit": 25, "offset": 0}, "uiParameters": ""},
@@ -881,6 +899,10 @@ async def atlas_api(rest, request, features):
     query = dict(request.query_params)
     parts = rest.strip("/").split("/")
     visible = atlas_visible(user)
+    if parts[0] in {"entity", "lineage", "relationship"}:
+        return atlas_entity_api(parts, query, user, visible, features, request.query_params.getlist("guid"))
+    if parts[0] == "glossary":
+        return atlas_glossary_api(parts, query, visible)
     if parts[0] != "search":
         return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
     if not features and len(parts) > 1 and parts[1] in {"quick", "relations", "relationship", "suggestions"}:
@@ -976,4 +998,292 @@ async def atlas_api(rest, request, features):
         prefix, field = (query.get("prefixString") or "").lower(), query.get("fieldName") or "name"
         values = sorted({str(e["attributes"].get(field, "")) for e in visible if e["status"] != "DELETED" and str(e["attributes"].get(field, "")).lower().startswith(prefix) and prefix})
         return {"prefixString": query.get("prefixString", ""), "fieldName": field, "suggestions": values}
+    return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+
+
+def atlas_header(entity):
+    return {k: v for k, v in entity.items() if k != "attributes"} | {"attributes": {k: v for k, v in entity["attributes"].items() if k in {"qualifiedName", "name", "owner", "description", "createTime"}}}
+
+
+def atlas_classifications(entity):
+    own = [{"typeName": c, "entityGuid": entity["guid"], "entityStatus": "ACTIVE", "propagate": True, "removePropagationsOnEntityDelete": False, "validityPeriods": [],
+        "attributes": ATLAS_CLASSIFICATION_ATTRIBUTES.get((entity["guid"], c), {})} for c in entity["classificationNames"]]
+    # A column inherits its table's classifications by propagation.
+    if entity["typeName"] == "hive_column":
+        table = next((atlas_by_guid(r["end1"]) for r in ATLAS_RELATIONSHIPS if r["end2"] == entity["guid"] and r["typeName"] == "hive_table_columns"), None)
+        own += [{"typeName": c, "entityGuid": table["guid"], "entityStatus": "ACTIVE", "propagate": True, "removePropagationsOnEntityDelete": False, "validityPeriods": [], "attributes": {}}
+            for c in (table["classificationNames"] if table else []) if c not in entity["classificationNames"]]
+    return own
+
+
+def atlas_full(entity):
+    related = {}
+    for r in ATLAS_RELATIONSHIPS:
+        for me, other, attr in ((r["end1"], r["end2"], r["end1Attr"]), (r["end2"], r["end1"], r["end2Attr"])):
+            if me == entity["guid"]:
+                target = atlas_by_guid(other)
+                related.setdefault(attr, []).append({"guid": target["guid"], "typeName": target["typeName"], "displayText": target["attributes"]["name"], "relationshipGuid": r["guid"], "relationshipStatus": "ACTIVE", "entityStatus": target["status"]})
+    singular = {"db", "table"}
+    relationship_attributes = {k: (v[0] if k in singular else v) for k, v in related.items()}
+    full = {**entity, "attributes": {**entity["attributes"], "description": entity["attributes"].get("description")}, "relationshipAttributes": relationship_attributes,
+        "classifications": atlas_classifications(entity), "createdBy": "atlas-sync", "updatedBy": "steward" if entity["classificationNames"] else "atlas-sync",
+        "createTime": 1760000000000, "updateTime": 1760007200000, "version": 2 if entity["classificationNames"] else 0, "proxy": False, "isIncomplete": False}
+    referred = {g: atlas_header(atlas_by_guid(g)) for v in related.values() for g in [x["guid"] for x in v]}
+    return {"referredEntities": referred, "entity": full}
+
+
+def atlas_lineage(entity, direction, depth):
+    nodes, edges, frontier = {entity["guid"]: entity}, set(), {entity["guid"]}
+    for _ in range(max(1, depth) * 2):  # each hop crosses a process and a dataset
+        step = set()
+        for guid in frontier:
+            for source, target in ATLAS_LINEAGE:
+                if direction in ("INPUT", "BOTH") and target == guid:
+                    edges.add((source, target)); step.add(source)
+                if direction in ("OUTPUT", "BOTH") and source == guid:
+                    edges.add((source, target)); step.add(target)
+        step -= set(nodes)
+        for guid in step:
+            nodes[guid] = atlas_by_guid(guid)
+        frontier = step
+        if not frontier:
+            break
+    return {"baseEntityGuid": entity["guid"], "lineageDirection": direction, "lineageDepth": depth, "guidEntityMap": {g: atlas_header(e) for g, e in nodes.items()},
+        "relations": [{"fromEntityId": a, "toEntityId": b, "relationshipId": f"lin-{a}-{b}"} for a, b in sorted(edges)]}
+
+
+def atlas_entity_api(parts, query, user, visible, features, guids=()):
+    missing = lambda guid: atlas_error(404, "ATLAS-404-00-005", f"Given instance guid {guid} is invalid/not found")
+    forbidden = lambda what: atlas_error(403, "ATLAS-403-00-001", f"{user} is not authorized to perform read entity : {what}")
+
+    def lookup(guid):
+        entity = atlas_by_guid(guid)
+        if entity is None:
+            return None, missing(guid)
+        if entity not in visible:
+            return None, forbidden(entity["attributes"]["qualifiedName"])
+        return entity, None
+
+    def by_unique(type_name, index=None):
+        prefix = f"attr_{index}:" if index is not None else "attr:"
+        attrs = {k[len(prefix):]: v for k, v in query.items() if k.startswith(prefix)}
+        if not attrs:
+            return None, atlas_error(400, "ATLAS-400-00-00C", "attr:<name>=<value> is required") if index is None else (None, None)
+        entity = next((e for e in ATLAS_ENTITIES if e["typeName"] == type_name and all(str(e["attributes"].get(k)) == v for k, v in attrs.items())), None)
+        if entity is None:
+            return None, atlas_error(404, "ATLAS-404-00-007", f"Instance {type_name} with unique attribute {attrs} does not exist")
+        if entity not in visible:
+            return None, forbidden(entity["attributes"]["qualifiedName"])
+        return entity, None
+
+    if parts[0] == "entity":
+        if parts[1:] == ["bulk"]:
+            guids = [g for g in guids if g]
+            found, referred = [], {}
+            for guid in guids:
+                entity, err = lookup(guid)
+                if err is not None and err.status_code == 404:
+                    return err
+                if entity is not None:
+                    full = atlas_full(entity)
+                    found.append(full["entity"]); referred.update(full["referredEntities"])
+            if not found:
+                return atlas_error(404, "ATLAS-404-00-005", "Given instance guid is invalid/not found") if not guids else forbidden(",".join(guids))
+            return {"entities": found, "referredEntities": referred}
+        if parts[1:] == ["bulk", "headers"]:
+            if not features:
+                return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+            since = int(query.get("tagUpdateStartTime", 0) or 0)
+            changed = [e for e in visible if e["classificationNames"] and 1760007200000 >= since]
+            return {"guidHeaderMap": {e["guid"]: atlas_header(e) for e in changed}}
+        if parts[1:3] == ["bulk", "uniqueAttribute"] and len(parts) == 5:
+            found, referred, i = [], {}, 0
+            while any(k.startswith(f"attr_{i}:") for k in query):
+                entity, err = by_unique(parts[4], i)
+                if err is not None:
+                    return err
+                full = atlas_full(entity); found.append(full["entity"]); referred.update(full["referredEntities"]); i += 1
+            if not found:
+                return atlas_error(400, "ATLAS-400-00-00C", "attr_<n>:<name>=<value> is required")
+            return {"entities": found, "referredEntities": referred}
+        if parts[1] == "guid" and len(parts) >= 3:
+            entity, err = lookup(parts[2])
+            if err is not None:
+                return err
+            if len(parts) == 3:
+                return atlas_full(entity)
+            if parts[3] == "header":
+                return atlas_header(entity)
+            if parts[3] == "classifications":
+                return {"list": atlas_classifications(entity), "startIndex": 0, "pageSize": 100, "totalCount": len(atlas_classifications(entity)), "sortType": "NONE"}
+            if parts[3] == "classification" and len(parts) == 5:
+                found = next((c for c in atlas_classifications(entity) if c["typeName"] == parts[4]), None)
+                return found or atlas_error(404, "ATLAS-404-00-013", f"Classification {parts[4]} is not associated with entity {parts[2]}")
+        if parts[1] == "uniqueAttribute" and parts[2] == "type" and len(parts) in (4, 5):
+            entity, err = by_unique(parts[3])
+            if err is not None:
+                return err
+            return atlas_header(entity) if len(parts) == 5 and parts[4] == "header" else atlas_full(entity)
+        if len(parts) == 3 and parts[2] == "audit":
+            entity, err = lookup(parts[1])
+            if err is not None:
+                return err
+            events = sorted(ATLAS_AUDIT.get(parts[1], []), key=lambda e: -e["timestamp"])
+            if query.get("auditAction"):
+                events = [e for e in events if e["action"] == query["auditAction"]]
+            if query.get("startKey"):
+                events = [e for e in events if e["eventKey"] < query["startKey"]]
+            count = int(query.get("count", 100) or 100)
+            return [{**e, "entityId": parts[1], "type": "ENTITY_AUDIT_V2"} for e in events[:count]]
+    if parts[0] == "lineage":
+        direction, depth = query.get("direction", "BOTH").upper(), int(query.get("depth", 3) or 3)
+        if direction not in ("INPUT", "OUTPUT", "BOTH"):
+            return atlas_error(400, "ATLAS-400-00-00C", "direction must be INPUT, OUTPUT or BOTH")
+        if parts[1:3] == ["uniqueAttribute", "type"] and len(parts) == 4:
+            entity, err = by_unique(parts[3])
+        else:
+            entity, err = lookup(parts[1])
+        if err is not None:
+            return err
+        info = atlas_lineage(entity, direction, depth)
+        info["guidEntityMap"] = {g: h for g, h in info["guidEntityMap"].items() if atlas_by_guid(g) in visible}
+        info["relations"] = [r for r in info["relations"] if r["fromEntityId"] in info["guidEntityMap"] and r["toEntityId"] in info["guidEntityMap"]]
+        return info
+    if parts[0] == "relationship" and parts[1] == "guid" and len(parts) == 3:
+        rel = next((r for r in ATLAS_RELATIONSHIPS if r["guid"] == parts[2]), None)
+        if rel is None:
+            return atlas_error(404, "ATLAS-404-00-00C", f"Given relationship guid {parts[2]} is invalid/not found")
+        e1, e2 = atlas_by_guid(rel["end1"]), atlas_by_guid(rel["end2"])
+        if e1 not in visible or e2 not in visible:
+            return forbidden(parts[2])
+        view = atlas_relationship_view(rel)
+        full = {**view, "label": f"__{rel['typeName']}", "propagateTags": "NONE", "createdBy": "atlas-sync", "updatedBy": "atlas-sync", "createTime": 1760000000000, "updateTime": 1760000000000, "version": 0}
+        result = {"relationship": full}
+        if str(query.get("extendedInfo", "false")).lower() == "true":
+            result["referredEntities"] = {e1["guid"]: atlas_header(e1), e2["guid"]: atlas_header(e2)}
+        return result
+    return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+
+
+# Glossaries: Business (categories Sales > Customer Management, Finance; terms Customer, Order, Invoice, Payroll) and
+# Regulatory (term PII, assigned to every PII-classified entity). Glossary objects are visible to every authenticated
+# user; the entities a term is assigned to are filtered by identity like everything else.
+ATLAS_GLOSSARIES = {
+    "gl-business": {"guid": "gl-business", "qualifiedName": "Business", "name": "Business", "shortDescription": "Business vocabulary", "longDescription": "Terms the business uses for its data, owned by the data stewards.", "language": "en", "usage": "Tag tables and columns with the term they hold"},
+    "gl-regulatory": {"guid": "gl-regulatory", "qualifiedName": "Regulatory", "name": "Regulatory", "shortDescription": "Regulatory vocabulary", "longDescription": "", "language": "en", "usage": ""},
+}
+ATLAS_CATEGORIES = {
+    "cat-sales": {"guid": "cat-sales", "qualifiedName": "Sales@Business", "name": "Sales", "shortDescription": "Selling and customers", "longDescription": "", "glossary": "gl-business", "parent": None},
+    "cat-customer-mgmt": {"guid": "cat-customer-mgmt", "qualifiedName": "Sales.Customer Management@Business", "name": "Customer Management", "shortDescription": "Knowing our customers", "longDescription": "", "glossary": "gl-business", "parent": "cat-sales"},
+    "cat-finance": {"guid": "cat-finance", "qualifiedName": "Finance@Business", "name": "Finance", "shortDescription": "Money in and out", "longDescription": "", "glossary": "gl-business", "parent": None},
+}
+ATLAS_TERMS = {
+    "term-customer": {"guid": "term-customer", "qualifiedName": "Customer@Business", "name": "Customer", "shortDescription": "A person or organisation that buys from us", "longDescription": "Identified by a customer id; may hold personal data.", "abbreviation": "", "usage": "Tables and columns describing customers", "examples": ["customers table", "customer_id column"],
+        "glossary": "gl-business", "categories": ["cat-customer-mgmt"], "assigned": ["tbl-customers"], "related": {"seeAlso": ["term-order"]}, "classifications": []},
+    "term-order": {"guid": "term-order", "qualifiedName": "Order@Business", "name": "Order", "shortDescription": "A customer's request to buy", "longDescription": "", "abbreviation": "", "usage": "", "examples": [],
+        "glossary": "gl-business", "categories": ["cat-sales"], "assigned": [], "related": {"seeAlso": ["term-customer", "term-invoice"]}, "classifications": []},
+    "term-invoice": {"guid": "term-invoice", "qualifiedName": "Invoice@Business", "name": "Invoice", "shortDescription": "A bill sent for an order", "longDescription": "", "abbreviation": "INV", "usage": "", "examples": [],
+        "glossary": "gl-business", "categories": ["cat-finance"], "assigned": [], "related": {"seeAlso": ["term-order"], "synonyms": ["term-bill"]}, "classifications": []},
+    "term-bill": {"guid": "term-bill", "qualifiedName": "Bill@Business", "name": "Bill", "shortDescription": "Synonym of Invoice", "longDescription": "", "abbreviation": "", "usage": "", "examples": [],
+        "glossary": "gl-business", "categories": ["cat-finance"], "assigned": [], "related": {"synonyms": ["term-invoice"]}, "classifications": []},
+    "term-payroll": {"guid": "term-payroll", "qualifiedName": "Payroll@Business", "name": "Payroll", "shortDescription": "Salaries paid to staff", "longDescription": "", "abbreviation": "", "usage": "", "examples": [],
+        "glossary": "gl-business", "categories": ["cat-finance"], "assigned": ["tbl-payroll"], "related": {}, "classifications": [{"typeName": "Confidential", "attributes": {}}]},
+    "term-pii": {"guid": "term-pii", "qualifiedName": "PII@Regulatory", "name": "PII", "shortDescription": "Personally identifiable information", "longDescription": "Data that identifies a natural person; handling is regulated.", "abbreviation": "PII", "usage": "", "examples": ["email", "salary"],
+        "glossary": "gl-regulatory", "categories": [], "assigned": ["tbl-customers", "col-email", "tbl-payroll", "col-salary"], "related": {}, "classifications": []},
+}
+
+
+def atlas_term_header(guid):
+    term = ATLAS_TERMS[guid]
+    return {"termGuid": guid, "relationGuid": f"rel-{guid}", "displayText": term["name"], "status": "ACTIVE"}
+
+
+def atlas_category_header(guid):
+    category = ATLAS_CATEGORIES[guid]
+    return {"categoryGuid": guid, "relationGuid": f"rel-{guid}", "displayText": category["name"], **({"parentCategoryGuid": category["parent"]} if category["parent"] else {})}
+
+
+def atlas_glossary_view(guid):
+    g = ATLAS_GLOSSARIES[guid]
+    return {**g, "terms": [atlas_term_header(t) for t in ATLAS_TERMS if ATLAS_TERMS[t]["glossary"] == guid], "categories": [atlas_category_header(c) for c in ATLAS_CATEGORIES if ATLAS_CATEGORIES[c]["glossary"] == guid]}
+
+
+def atlas_category_view(guid):
+    c = ATLAS_CATEGORIES[guid]
+    view = {k: v for k, v in c.items() if k not in {"glossary", "parent"}}
+    view["anchor"] = {"glossaryGuid": c["glossary"], "relationGuid": f"anchor-{guid}"}
+    if c["parent"]:
+        view["parentCategory"] = atlas_category_header(c["parent"])
+    children = [atlas_category_header(x) for x in ATLAS_CATEGORIES if ATLAS_CATEGORIES[x]["parent"] == guid]
+    if children:
+        view["childrenCategories"] = children
+    terms = [atlas_term_header(t) for t in ATLAS_TERMS if guid in ATLAS_TERMS[t]["categories"]]
+    if terms:
+        view["terms"] = terms
+    return view
+
+
+def atlas_term_view(guid, visible):
+    t = ATLAS_TERMS[guid]
+    view = {k: v for k, v in t.items() if k not in {"glossary", "categories", "assigned", "related"}}
+    view["anchor"] = {"glossaryGuid": t["glossary"], "relationGuid": f"anchor-{guid}"}
+    if t["categories"]:
+        view["categories"] = [atlas_category_header(c) for c in t["categories"]]
+    assigned = [atlas_by_guid(g) for g in t["assigned"] if atlas_by_guid(g) in visible]
+    if assigned:
+        view["assignedEntities"] = [{"guid": e["guid"], "typeName": e["typeName"], "displayText": e["attributes"]["name"], "relationshipGuid": f"assign-{guid}-{e['guid']}", "relationshipStatus": "ACTIVE", "entityStatus": e["status"],
+            "uniqueAttributes": {"qualifiedName": e["attributes"]["qualifiedName"]}} for e in assigned]
+    for relation, others in t["related"].items():
+        view[relation] = [atlas_term_header(o) for o in others]
+    return view
+
+
+def atlas_glossary_api(parts, query, visible):
+    not_found = lambda guid: atlas_error(404, "ATLAS-404-00-005", f"Given instance guid {guid} is invalid/not found")
+    limit, offset = int(query.get("limit", -1) or -1), int(query.get("offset", 0) or 0)
+    page = lambda items: items[offset:] if limit < 0 else items[offset:offset + limit]
+    if parts == ["glossary"]:
+        return page([atlas_glossary_view(g) for g in ATLAS_GLOSSARIES])
+    if parts[1] == "category" and len(parts) >= 3:
+        if parts[2] not in ATLAS_CATEGORIES:
+            return not_found(parts[2])
+        if len(parts) == 3:
+            return atlas_category_view(parts[2])
+        if parts[3] == "related":
+            c = ATLAS_CATEGORIES[parts[2]]
+            related = {}
+            if c["parent"]:
+                related["parent"] = [atlas_category_header(c["parent"])]
+            children = [atlas_category_header(x) for x in ATLAS_CATEGORIES if ATLAS_CATEGORIES[x]["parent"] == parts[2]]
+            if children:
+                related["children"] = children
+            return related
+        if parts[3] == "terms":
+            return page([atlas_term_header(t) for t in ATLAS_TERMS if parts[2] in ATLAS_TERMS[t]["categories"]])
+    if parts[1] in ("term", "terms") and len(parts) >= 3:
+        if parts[2] not in ATLAS_TERMS:
+            return not_found(parts[2])
+        if len(parts) == 3:
+            return atlas_term_view(parts[2], visible)
+        if parts[3] == "assignedEntities":
+            return page(atlas_term_view(parts[2], visible).get("assignedEntities", []))
+        if parts[3] == "related":
+            return {relation: [atlas_term_header(o) for o in others] for relation, others in ATLAS_TERMS[parts[2]]["related"].items()}
+    if len(parts) >= 2 and parts[1] in ATLAS_GLOSSARIES:
+        guid = parts[1]
+        if len(parts) == 2:
+            return atlas_glossary_view(guid)
+        if parts[2] == "detailed":
+            view = atlas_glossary_view(guid)
+            return {**view, "termInfo": {t: atlas_term_view(t, visible) for t in ATLAS_TERMS if ATLAS_TERMS[t]["glossary"] == guid}, "categoryInfo": {c: atlas_category_view(c) for c in ATLAS_CATEGORIES if ATLAS_CATEGORIES[c]["glossary"] == guid}}
+        if parts[2:] == ["categories"]:
+            return page([atlas_category_view(c) for c in ATLAS_CATEGORIES if ATLAS_CATEGORIES[c]["glossary"] == guid])
+        if parts[2:] == ["categories", "headers"]:
+            return page([atlas_category_header(c) for c in ATLAS_CATEGORIES if ATLAS_CATEGORIES[c]["glossary"] == guid])
+        if parts[2:] == ["terms"]:
+            return page([atlas_term_view(t, visible) for t in ATLAS_TERMS if ATLAS_TERMS[t]["glossary"] == guid])
+        if parts[2:] == ["terms", "headers"]:
+            return page([atlas_term_header(t) for t in ATLAS_TERMS if ATLAS_TERMS[t]["glossary"] == guid])
+    if len(parts) >= 2 and parts[1] not in ATLAS_GLOSSARIES and parts[1] not in ("category", "term", "terms"):
+        return not_found(parts[1])
     return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")

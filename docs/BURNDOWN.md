@@ -14,7 +14,7 @@ nobody asked for. Each pack below is one seed, tested against a fake of its API
 in the mock service, with real-endpoint verification recorded when the customer
 environment allows it.
 
-## 1. Tool packs to ship as seeds (151 `keep` tools, 89 provided so far)
+## 1. Tool packs to ship as seeds (151 `keep` tools, 115 provided so far)
 
 Order follows the customer's goal: files first, then who-may-see-what, then the
 catalogue, then Ozone inventory and table maintenance.
@@ -25,8 +25,8 @@ catalogue, then Ozone inventory and table maintenance.
 | 2 | `s3_extras` | 5 new (12 keep, 7 in `s3`) | Ozone S3 Gateway | [x] 2026-10-30: bucket access check, bulk delete, object tags (get, set with merge or replace, delete all or named) |
 | 3 | `ranger_public` | 31 | Ranger public API v2 | [x] 2026-10-30. Read-only: service types, services, policies, roles, security zones. Flexible by configuration, not by customer profile: `prefix` (direct Ranger Admin or a Knox path), connection `auth_mode` (basic, forward-token, static; kerberos later), `scope` `all` or `caller` (policy and role answers narrowed to the calling user), version tolerance (roles and zones endpoints missing on Ranger 1.x produce a clear message, and the probe reports which feature groups answered). The fake serves two prefixes, Basic and Bearer credentials, an auditor and a limited account. |
 | 4 | `atlas_discovery` | 13 | Atlas v2 search | [x] 2026-10-30: basic, filtered (SearchParameters), DSL (entities or a select table), full-text, quick with per-type counts, attribute prefix, relationship and related-entity search, saved searches (list, show, run by name or guid), suggestions. `prefix` for direct or Knox; identity filtering is Atlas's own, so forward-token gives the caller's view; quick, relations, related-entity and suggestions report an Atlas-before-2.1 message when missing. Fake at direct, Knox and old prefixes with per-identity visibility. |
-| 5 | `atlas_entities` | 13 | Atlas v2 entity and lineage | [ ] by guid, by unique attribute, headers, classifications, audit, lineage, relationships |
-| 6 | `atlas_glossary` | 13 | Atlas v2 glossary | [ ] glossaries, categories, terms, assigned entities |
+| 5 | `atlas_entities` | 13 | Atlas v2 entity and lineage | [x] 2026-10-30: full entity and header by guid or by type and qualified name, several at once, recently classified entities, classifications (own and propagated), change history with paging, lineage upstream, downstream or both as datasets, processes and edges, relationship by guid. Same `prefix` and identity model as atlas_discovery; `max_lineage_depth` caps how far an agent may walk. The Atlas fake gained full entities, propagated classifications, audit events, a four-step lineage and the entity, lineage and relationship endpoints. |
+| 6 | `atlas_glossary` | 13 | Atlas v2 glossary | [x] 2026-10-30: glossaries (list with name filter, one, detailed), categories (full, names, one, parent and children, its terms), terms (full, names, one, related terms by relation, assigned entities). Same `prefix` and identity model; glossary objects are public to Atlas users while assigned entities follow the caller's view. The Atlas fake gained two glossaries with a category hierarchy, related terms and term assignments. |
 | 7 | `atlas_types` | 5 | Atlas v2 types | [ ] type definitions needed to write DSL searches |
 | 8 | `ozone_recon` | 13 | Ozone Recon | [ ] volumes, buckets, keys, namespace usage, quota, file size distribution, cluster state |
 | 9 | `cdp_lakehouseopt` | 14 | CDP Lakehouse Optimizer | [ ] environments, namespaces, tables, policies, associations, tasks (reads) |

@@ -83,35 +83,36 @@ def test_the_seed_declares_thirteen_read_tools():
 @gateway
 def test_searches(executor):
     tables = ok(executor, "search_basic", type_name="hive_table")
-    assert names(tables) == ["customers", "orders", "payroll"] and tables["count"] == 3 and not tables["truncated"] and tables["approximate_total"] == 3
+    assert names(tables) == ["customers", "order_summary", "orders", "payroll"] and tables["count"] == 4 and not tables["truncated"] and tables["approximate_total"] == 4
     customers = next(e for e in tables["entities"] if e["name"] == "customers")
     assert customers == {"guid": "tbl-customers", "type": "hive_table", "name": "customers", "qualified_name": "sales.customers@cm", "owner": "alice", "description": "Customer master data", "status": "active", "classifications": ["PII"], "terms": ["Customer"]}
     assert names(ok(executor, "search_basic", classification="PII")) == ["customers", "email", "payroll", "salary"]
     assert names(ok(executor, "search_basic", query="payroll")) == ["payroll", "salary"]
-    assert names(ok(executor, "search_basic", type_name="hive_table", include_deleted=True)) == ["customers", "orders", "orders_2019", "payroll"]
-    assert names(ok(executor, "with_deleted", type_name="hive_table")) == ["customers", "orders", "orders_2019", "payroll"]
+    assert names(ok(executor, "search_basic", type_name="hive_table", include_deleted=True)) == ["customers", "order_summary", "orders", "orders_2019", "payroll"]
+    assert names(ok(executor, "with_deleted", type_name="hive_table")) == ["customers", "order_summary", "orders", "orders_2019", "payroll"]
     assert "Give a query" in error(executor, "search_basic")
     assert "ASCENDING or DESCENDING" in error(executor, "search_basic", type_name="hive_table", sort_by="name", sort_order="up")
     first = ok(executor, "small_pages", type_name="hive_table", limit=50)
-    assert first["count"] == 2 and first["truncated"] and first["approximate_total"] == 3
+    assert first["count"] == 2 and first["truncated"] and first["approximate_total"] == 4
     rest = ok(executor, "small_pages", type_name="hive_table", offset=2)
-    assert rest["count"] == 1 and not rest["truncated"]
-    filtered = ok(executor, "search_with_filters", type_name="hive_table", filters="owner = alice, name like ord*", attributes="tableType")
+    assert rest["count"] == 2 and not rest["truncated"]
+    filtered = ok(executor, "search_with_filters", type_name="hive_table", filters="owner = alice, name like orders*", attributes="tableType")
     assert names(filtered) == ["orders"] and filtered["entities"][0]["attributes"] == {"tableType": "MANAGED_TABLE"}
     assert names(ok(executor, "search_with_filters", type_name="hive_table", term="Customer")) == ["customers"]
     assert names(ok(executor, "search_with_filters", type_name="hive_table", filters=json.dumps({"condition": "OR", "criterion": [{"attributeName": "owner", "operator": "eq", "attributeValue": "bob"}, {"attributeName": "name", "operator": "startsWith", "attributeValue": "cust"}]}))) == ["customers", "payroll"]
     assert "attribute operator value" in error(executor, "search_with_filters", type_name="hive_table", filters="owner")
     dsl = ok(executor, "search_dsl", query="hive_table where owner = 'alice' select name, qualifiedName")
-    assert dsl["columns"] == ["name", "qualifiedName"] and sorted(dsl["rows"]) == [["customers", "sales.customers@cm"], ["orders", "sales.orders@cm"]] and dsl["count"] == 2 and dsl["query"].startswith("hive_table")
+    assert dsl["columns"] == ["name", "qualifiedName"] and sorted(dsl["rows"]) == [["customers", "sales.customers@cm"], ["order_summary", "sales.order_summary@cm"], ["orders", "sales.orders@cm"]] and dsl["count"] == 3 and dsl["query"].startswith("hive_table")
     assert names(ok(executor, "search_dsl", query="hive_table isa PII")) == ["customers", "payroll"]
-    assert names(ok(executor, "search_dsl", query="where name like 'ord*'", type_name="hive_table")) == ["orders"]
+    assert names(ok(executor, "search_dsl", query="where name like 'ord*'", type_name="hive_table")) == ["order_summary", "orders"]
     assert "Invalid DSL" in error(executor, "search_dsl", query="select * from nowhere;")
     assert "Give a DSL query" in error(executor, "search_dsl", query="  ")
     assert names(ok(executor, "search_full_text", query="ledger")) == ["finance"]
-    assert names(ok(executor, "search_full_text", query="orders", include_deleted=True)) == ["orders", "orders_2019"]
+    assert names(ok(executor, "search_full_text", query="archived")) == []
+    assert names(ok(executor, "search_full_text", query="archived", include_deleted=True)) == ["orders_2019"]
     quick = ok(executor, "quick_search", query="sales")
-    assert names(quick) == ["customers", "email", "orders", "sales"] and quick["by_type"] == {"hive_db": 1, "hive_table": 2, "hive_column": 1}
-    assert names(ok(executor, "quick_search", query="sales", type_name="hive_table")) == ["customers", "orders"]
+    assert names(quick) == ["customers", "email", "load_orders", "order_summary", "orders", "sales", "summarise_orders"] and quick["by_type"] == {"hive_db": 1, "hive_table": 3, "hive_column": 1, "hive_process": 2}
+    assert names(ok(executor, "quick_search", query="sales", type_name="hive_table")) == ["customers", "order_summary", "orders"]
     assert names(ok(executor, "search_by_attribute", attribute="qualifiedName", value_prefix="finance.")) == ["payroll", "salary"]
     assert names(ok(executor, "search_by_attribute", attribute="owner", value_prefix="ali", type_name="hive_db")) == ["sales"]
     assert "without slashes" in error(executor, "search_by_attribute", attribute=" ", value_prefix="x")
@@ -121,10 +122,10 @@ def test_searches(executor):
 def test_relationships_saved_searches_and_suggestions(executor):
     relations = ok(executor, "search_relations", relationship_type="hive_table_columns")
     assert relations["count"] == 2 and relations["relations"][0] == {"guid": "rel-4", "type": "hive_table_columns", "status": "active", "from": {"guid": "tbl-customers", "type": "hive_table", "qualified_name": "sales.customers@cm"}, "to": {"guid": "col-email", "type": "hive_column", "qualified_name": "sales.customers.email@cm"}}
-    assert ok(executor, "search_relations")["approximate_total"] == 6
+    assert ok(executor, "search_relations")["approximate_total"] == 11
     columns = ok(executor, "get_related_entities", guid="tbl-payroll", relation="columns")
     assert names(columns) == ["salary"] and columns["relation"] == "columns"
-    assert names(ok(executor, "get_related_entities", guid="db-sales", relation="tables")) == ["customers", "orders"]
+    assert names(ok(executor, "get_related_entities", guid="db-sales", relation="tables")) == ["customers", "order_summary", "orders"]
     assert names(ok(executor, "get_related_entities", guid="tbl-customers", relation="meanings")) == ["Customer"]
     assert names(ok(executor, "get_related_entities", guid="term-customer", relation="assignedEntities")) == ["customers"]
     assert "not found" in error(executor, "get_related_entities", guid="nope", relation="columns")
@@ -136,10 +137,10 @@ def test_relationships_saved_searches_and_suggestions(executor):
     assert ok(executor, "get_saved_search", name="PII tables")["classification"] == "PII"
     assert "not found" in error(executor, "get_saved_search", name="nope")
     assert names(ok(executor, "run_saved_search", name="PII tables")) == ["customers", "payroll"]
-    assert names(ok(executor, "run_saved_search", name="my sales tables", user="alice")) == ["customers", "orders"]
+    assert names(ok(executor, "run_saved_search", name="my sales tables", user="alice")) == ["customers", "order_summary", "orders"]
     assert names(ok(executor, "run_saved_search_by_guid", guid="ss-1")) == ["customers", "payroll"]
-    assert ok(executor, "suggest", prefix="ord") == {"prefix": "ord", "field": "name", "suggestions": ["orders"]}
-    assert ok(executor, "suggest", prefix="sales.", field="qualifiedName")["suggestions"] == ["sales.customers.email@cm", "sales.customers@cm", "sales.orders@cm"]
+    assert ok(executor, "suggest", prefix="ord") == {"prefix": "ord", "field": "name", "suggestions": ["order_summary", "orders"]}
+    assert ok(executor, "suggest", prefix="sales.", field="qualifiedName")["suggestions"] == ["sales.customers.email@cm", "sales.customers@cm", "sales.etl.load_orders@cm", "sales.etl.summarise_orders@cm", "sales.order_summary@cm", "sales.orders@cm"]
     assert "Give the start" in error(executor, "suggest", prefix="")
 
 
@@ -147,14 +148,14 @@ def test_relationships_saved_searches_and_suggestions(executor):
 def test_a_forwarded_token_through_knox_gets_the_callers_own_view(executor):
     assert "credentials" in error(executor, "knox_search_basic", type_name="hive_table")  # no token forwarded
     alice, bob = jwt_for("alice"), jwt_for("bob")
-    assert names(ok(executor, "knox_search_basic", caller="alice", token=alice, type_name="hive_table")) == ["customers", "orders"]
+    assert names(ok(executor, "knox_search_basic", caller="alice", token=alice, type_name="hive_table")) == ["customers", "order_summary", "orders"]
     assert names(ok(executor, "knox_search_basic", caller="bob", token=bob, type_name="hive_table")) == ["payroll"]
     assert names(ok(executor, "knox_search_basic", caller="carol", token=jwt_for("carol"), classification="PII")) == []
     assert ok(executor, "knox_quick_search", caller="alice", token=alice, query="PII")["by_type"] == {"hive_table": 1, "hive_column": 1}
-    assert ok(executor, "knox_search_relations", caller="alice", token=alice)["count"] == 4  # only edges whose both ends she may see
+    assert ok(executor, "knox_search_relations", caller="alice", token=alice)["count"] == 9  # only edges whose both ends she may see
     assert ok(executor, "knox_list_saved_searches", caller="alice", token=alice)["saved_searches"][0]["name"] == "my sales tables"
     assert "not authorized" in error(executor, "knox_list_saved_searches", caller="alice", token=alice, user="admin")
-    assert names(ok(executor, "knox_run_saved_search", caller="alice", token=alice, name="my sales tables")) == ["customers", "orders"]
+    assert names(ok(executor, "knox_run_saved_search", caller="alice", token=alice, name="my sales tables")) == ["customers", "order_summary", "orders"]
     assert "not authorized" in error(executor, "knox_run_saved_search_by_guid", caller="alice", token=alice, guid="ss-1")
     assert ok(executor, "knox_suggest", caller="bob", token=bob, prefix="s")["suggestions"] == ["salary", "shared"]
 

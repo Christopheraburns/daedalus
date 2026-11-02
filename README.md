@@ -448,8 +448,19 @@ searches and name suggestions. Atlas filters results by the authenticated
 identity itself, so a `forward-token` connection through Knox answers with the
 caller's own view and a `basic` connection with the service account's; `prefix`
 again selects direct or Knox, and the four endpoints Atlas added in 2.1 report a
-clear message on older servers. The Atlas fake in `mock-api` has a sales mart
-alice may see and a finance ledger bob may see. Editing a seed makes a
+clear message on older servers. The fifth seed, `atlas_entities` (13 tools),
+explains what discovery found: an entity in full or as a header, by guid or by
+type and qualified name, several at once, recently classified entities, its
+classifications with propagated ones marked, its change history, its lineage
+upstream and downstream as datasets, processes and edges, and any relationship by
+guid. The Atlas fake in `mock-api` has a sales mart alice may see and a finance
+ledger bob may see, with a four-step lineage from an HDFS path through two
+processes to a summary table. The sixth seed, `atlas_glossary` (13 tools), is
+the business vocabulary: glossaries, their category hierarchy, each term's
+definition, related terms (synonyms, see-also, broader and narrower) and the
+data assets a term is assigned to, so an agent can go from "customer data" to
+the tables and columns that hold it. Glossary objects are visible to every Atlas
+user; the assigned entities follow the caller's view. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored

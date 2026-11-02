@@ -49,7 +49,7 @@ duplicates and plumbing, and `deprecated` follows the vendor spec. The `notes` c
 | `webhdfs` | 33 | 19 | 12 | 0 |
 | **total** | **151** | **356** | **139** | **4** |
 
-So the Daedalus backlog is **151 tools** across 10 packs, of which 89 already exist: the `hdfs` and `s3` packs and the `webhdfs_admin`, `s3_extras`, `ranger_public` and `atlas_discovery` seeds (all completed on 2026-10-30, closing the `webhdfs`, `ozone_s3`, `ranger_public` and `atlas_discovery` packs; see `docs/BURNDOWN.md`).
+So the Daedalus backlog is **151 tools** across 10 packs, of which 115 already exist: the `hdfs` and `s3` packs and the `webhdfs_admin`, `s3_extras`, `ranger_public`, `atlas_discovery`, `atlas_entities` and `atlas_glossary` seeds (all completed on 2026-10-30, closing the `webhdfs`, `ozone_s3`, `ranger_public` and three Atlas packs; see `docs/BURNDOWN.md`).
 
 ## CDP Public Cloud control plane
 
