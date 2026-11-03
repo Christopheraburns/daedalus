@@ -460,7 +460,12 @@ the business vocabulary: glossaries, their category hierarchy, each term's
 definition, related terms (synonyms, see-also, broader and narrower) and the
 data assets a term is assigned to, so an agent can go from "customer data" to
 the tables and columns that hold it. Glossary objects are visible to every Atlas
-user; the assigned entities follow the caller's view. Editing a seed makes a
+user; the assigned entities follow the caller's view. The seventh seed,
+`atlas_types` (5 tools), reads the type system: which types exist, each type's
+definition, an entity type with every attribute it carries including the ones
+inherited from Asset and Referenceable, and a classification with the entity
+types it may be applied to, so an agent can write a correct DSL or filtered
+search before running it. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored

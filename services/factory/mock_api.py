@@ -903,6 +903,8 @@ async def atlas_api(rest, request, features):
         return atlas_entity_api(parts, query, user, visible, features, request.query_params.getlist("guid"))
     if parts[0] == "glossary":
         return atlas_glossary_api(parts, query, visible)
+    if parts[0] == "types":
+        return atlas_types_api(parts, query, features)
     if parts[0] != "search":
         return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
     if not features and len(parts) > 1 and parts[1] in {"quick", "relations", "relationship", "suggestions"}:
@@ -1287,3 +1289,118 @@ def atlas_glossary_api(parts, query, visible):
     if len(parts) >= 2 and parts[1] not in ATLAS_GLOSSARIES and parts[1] not in ("category", "term", "terms"):
         return not_found(parts[1])
     return Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+
+
+# Type system: entity types with inheritance, classifications with applicability, an enum, a struct, relationships and
+# (on Atlas 2.1+ only, so not on the /atlas-1 prefix) business metadata. Types are not filtered by identity.
+def atlas_attr(name, type_name, optional=True, cardinality="SINGLE", unique=False, indexable=False, description=None, default=None, **options):
+    attr = {"name": name, "typeName": type_name, "isOptional": optional, "cardinality": cardinality, "valuesMinCount": 0 if optional else 1, "valuesMaxCount": 1 if cardinality == "SINGLE" else 2147483647,
+        "isUnique": unique, "isIndexable": indexable, "includeInNotification": False, "searchWeight": -1}
+    if description:
+        attr["description"] = description
+    if default is not None:
+        attr["defaultValue"] = default
+    if options:
+        attr["options"] = options
+    return attr
+
+
+def atlas_type(name, category, guid, description, attributes=(), service_type=None, **extra):
+    item = {"category": category, "guid": guid, "createdBy": "admin", "updatedBy": "admin", "createTime": 1750000000000, "updateTime": 1750000000000, "version": 1, "name": name, "description": description,
+        "typeVersion": "1.0", "attributeDefs": list(attributes), **extra}
+    if service_type:
+        item["serviceType"] = service_type
+    return item
+
+
+def atlas_end(type_name, name, cardinality="SINGLE", container=False):
+    return {"type": type_name, "name": name, "isContainer": container, "cardinality": cardinality, "isLegacyAttribute": False}
+
+
+ATLAS_TYPES = [
+    atlas_type("Referenceable", "ENTITY", "type-referenceable", "Any entity that can be referenced by a unique name", [atlas_attr("qualifiedName", "string", optional=False, unique=True, indexable=True)], "atlas_core", superTypes=[]),
+    atlas_type("Asset", "ENTITY", "type-asset", "A named asset with an owner", [atlas_attr("name", "string", optional=False, indexable=True), atlas_attr("description", "string"), atlas_attr("owner", "string", indexable=True), atlas_attr("userDescription", "string")],
+        "atlas_core", superTypes=["Referenceable"]),
+    atlas_type("DataSet", "ENTITY", "type-dataset", "A set of data: a table, a file, a topic", [], "atlas_core", superTypes=["Asset"],
+        relationshipAttributeDefs=[{"name": "inputToProcesses", "typeName": "array<Process>", "isOptional": True, "cardinality": "SET", "relationshipTypeName": "dataset_process_inputs"},
+            {"name": "outputFromProcesses", "typeName": "array<Process>", "isOptional": True, "cardinality": "SET", "relationshipTypeName": "process_dataset_outputs"}]),
+    atlas_type("Process", "ENTITY", "type-process", "Something that reads inputs and writes outputs", [atlas_attr("inputs", "array<DataSet>", cardinality="SET"), atlas_attr("outputs", "array<DataSet>", cardinality="SET")], "atlas_core", superTypes=["Asset"]),
+    atlas_type("hive_db", "ENTITY", "type-hive-db", "A Hive database", [atlas_attr("clusterName", "string", optional=False, indexable=True), atlas_attr("location", "string"), atlas_attr("parameters", "map<string,string>"), atlas_attr("ownerType", "hive_principal_type")],
+        "hive", superTypes=["Asset"]),
+    atlas_type("hive_table", "ENTITY", "type-hive-table", "A Hive table", [atlas_attr("createTime", "date"), atlas_attr("lastAccessTime", "date"), atlas_attr("comment", "string"), atlas_attr("retention", "int"), atlas_attr("tableType", "string", indexable=True),
+        atlas_attr("temporary", "boolean", default="false"), atlas_attr("parameters", "map<string,string>")], "hive", superTypes=["DataSet"],
+        relationshipAttributeDefs=[{"name": "db", "typeName": "hive_db", "isOptional": False, "cardinality": "SINGLE", "relationshipTypeName": "hive_table_db"},
+            {"name": "columns", "typeName": "array<hive_column>", "isOptional": True, "cardinality": "SET", "relationshipTypeName": "hive_table_columns"}]),
+    atlas_type("hive_column", "ENTITY", "type-hive-column", "A column of a Hive table", [atlas_attr("type", "string", optional=False, indexable=True), atlas_attr("comment", "string"), atlas_attr("position", "int")], "hive", superTypes=["DataSet"],
+        relationshipAttributeDefs=[{"name": "table", "typeName": "hive_table", "isOptional": False, "cardinality": "SINGLE", "relationshipTypeName": "hive_table_columns"}]),
+    atlas_type("hive_process", "ENTITY", "type-hive-process", "A Hive query that produced data", [atlas_attr("startTime", "date", optional=False), atlas_attr("endTime", "date", optional=False), atlas_attr("userName", "string"), atlas_attr("queryText", "string", optional=False), atlas_attr("queryPlan", "string")],
+        "hive", superTypes=["Process"]),
+    atlas_type("hdfs_path", "ENTITY", "type-hdfs-path", "A path in HDFS or Ozone", [atlas_attr("path", "string", optional=False, indexable=True), atlas_attr("clusterName", "string"), atlas_attr("numberOfReplicas", "int"), atlas_attr("fileSize", "long"), atlas_attr("isFile", "boolean", default="false")],
+        "hdfs", superTypes=["DataSet"]),
+    atlas_type("PII", "CLASSIFICATION", "type-pii", "Personally identifiable information", [atlas_attr("type", "string", description="What kind of personal data")], superTypes=[], entityTypes=[]),
+    atlas_type("Confidential", "CLASSIFICATION", "type-confidential", "Restricted to named staff", [atlas_attr("level", "string", default="medium")], superTypes=[], entityTypes=["hive_table", "hdfs_path"]),
+    atlas_type("Curated", "CLASSIFICATION", "type-curated", "Reviewed and fit for reporting", [], superTypes=[], entityTypes=["hive_table"]),
+    atlas_type("hive_principal_type", "ENUM", "type-hive-principal-type", "Who owns a Hive object", [], "hive", elementDefs=[{"ordinal": 1, "value": "USER"}, {"ordinal": 2, "value": "ROLE"}, {"ordinal": 3, "value": "GROUP"}], defaultValue="USER"),
+    atlas_type("hive_order", "STRUCT", "type-hive-order", "A sort order on a column", [atlas_attr("col", "string", optional=False), atlas_attr("order", "int", optional=False)], "hive"),
+    atlas_type("hive_table_db", "RELATIONSHIP", "type-hive-table-db", "The database a table belongs to", [], "hive", relationshipCategory="AGGREGATION", propagateTags="NONE",
+        endDef1=atlas_end("hive_table", "db"), endDef2=atlas_end("hive_db", "tables", "SET", True)),
+    atlas_type("hive_table_columns", "RELATIONSHIP", "type-hive-table-columns", "The columns of a table", [], "hive", relationshipCategory="COMPOSITION", propagateTags="ONE_TO_TWO",
+        endDef1=atlas_end("hive_table", "columns", "SET", True), endDef2=atlas_end("hive_column", "table")),
+    atlas_type("dataset_process_inputs", "RELATIONSHIP", "type-dataset-process-inputs", "Data sets read by a process", [], "atlas_core", relationshipCategory="AGGREGATION", propagateTags="NONE",
+        endDef1=atlas_end("Process", "inputs", "SET"), endDef2=atlas_end("DataSet", "inputToProcesses", "SET")),
+    atlas_type("process_dataset_outputs", "RELATIONSHIP", "type-process-dataset-outputs", "Data sets written by a process", [], "atlas_core", relationshipCategory="AGGREGATION", propagateTags="NONE",
+        endDef1=atlas_end("Process", "outputs", "SET"), endDef2=atlas_end("DataSet", "outputFromProcesses", "SET")),
+    atlas_type("Governance", "BUSINESS_METADATA", "type-governance", "Stewardship facts kept per asset", [atlas_attr("steward", "string", applicableEntityTypes='["hive_table","hdfs_path"]', maxStrLength="50"),
+        atlas_attr("retention_days", "int", applicableEntityTypes='["hive_table"]')]),
+]
+ATLAS_TYPE_KEYS = {"ENTITY": "entityDefs", "CLASSIFICATION": "classificationDefs", "ENUM": "enumDefs", "STRUCT": "structDefs", "RELATIONSHIP": "relationshipDefs", "BUSINESS_METADATA": "businessMetadataDefs"}
+ATLAS_TYPE_PATHS = {"entitydef": "ENTITY", "classificationdef": "CLASSIFICATION", "enumdef": "ENUM", "structdef": "STRUCT", "relationshipdef": "RELATIONSHIP", "businessmetadatadef": "BUSINESS_METADATA"}
+
+
+def atlas_type_view(item):
+    view = dict(item)
+    if item["category"] in ("ENTITY", "CLASSIFICATION"):
+        view["subTypes"] = sorted(t["name"] for t in ATLAS_TYPES if t["category"] == item["category"] and item["name"] in t.get("superTypes", []))
+    return view
+
+
+def atlas_super_types(item):
+    names, pending = set(), list(item.get("superTypes", []))
+    while pending:
+        name = pending.pop()
+        if name not in names:
+            names.add(name)
+            parent = next((t for t in ATLAS_TYPES if t["name"] == name), None)
+            pending.extend(parent.get("superTypes", []) if parent else [])
+    return names
+
+
+def atlas_types_api(parts, query, features):
+    html_404 = Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+    types = [t for t in ATLAS_TYPES if features or t["category"] != "BUSINESS_METADATA"]
+    if parts[1:2] == ["typedefs"]:
+        if query.get("type"):
+            if query["type"].upper() not in ATLAS_TYPE_KEYS:
+                return atlas_error(400, "ATLAS-400-00-00D", f"Invalid type category {query['type']}")
+            types = [t for t in types if t["category"] == query["type"].upper()]
+        if query.get("supertype"):
+            types = [t for t in types if query["supertype"] in atlas_super_types(t)]
+        if query.get("serviceType"):
+            types = [t for t in types if t.get("serviceType") == query["serviceType"]]
+        if query.get("name"):
+            types = [t for t in types if t["name"] == query["name"]]
+        if parts[2:] == ["headers"]:
+            return [{"guid": t["guid"], "name": t["name"], "category": t["category"], **({"serviceType": t["serviceType"]} if t.get("serviceType") else {})} for t in types]
+        if len(parts) == 2:
+            return {key: [atlas_type_view(t) for t in types if t["category"] == category] for category, key in ATLAS_TYPE_KEYS.items() if features or category != "BUSINESS_METADATA"}
+        return html_404
+    if len(parts) == 4 and parts[2] == "name" and (parts[1] == "typedef" or parts[1] in ATLAS_TYPE_PATHS):
+        if parts[1] == "businessmetadatadef" and not features:
+            return html_404
+        item = next((t for t in types if t["name"] == parts[3]), None)
+        if item is None:
+            return atlas_error(404, "ATLAS-404-00-001", f"Given typename {parts[3]} was invalid")
+        if parts[1] != "typedef" and ATLAS_TYPE_PATHS[parts[1]] != item["category"]:
+            return atlas_error(400, "ATLAS-400-00-00B", f"Given type {parts[3]} doesn't match {ATLAS_TYPE_PATHS[parts[1]]}")
+        return atlas_type_view(item)
+    return html_404
