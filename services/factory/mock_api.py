@@ -1872,3 +1872,77 @@ async def cdp_lakehouseopt(operation: str, request: Request):
             out["nextPageToken"] = str(start + size)
         return out
     return cdp_error(404, "NOT_FOUND", f"Unknown operation {operation}")
+
+
+# ---- CDP control plane fake: Data Catalog -----------------------------------------------------------------------------
+# The same signed POSTs and API key as the Lakehouse Optimizer fake above.
+DC_DATALAKE = "crn:cdp:datalake:us-west-1:tenant:datalake:prod-dl"
+DC_ENV = "crn:cdp:environments:us-west-1:tenant:environment:prod"
+DC_SHARES = [
+    {"dataShareId": "ds-001", "dataShareName": "Customer 360", "isShared": True, "createdAt": "2026-03-03T10:00:00Z", "updatedAt": "2026-10-01T09:30:00Z", "createdBy": "alice", "keywords": ["customer", "crm"], "tags": ["PII"],
+        "expiryTime": "2027-03-03T00:00:00Z", "summary": "Customer master with masked contact details", "termsOfUse": "Internal partner use only",
+        "assets": [{"resourceId": "res-1", "guid": "tbl-customers", "createTime": "2026-03-03T10:00:00Z", "createdBy": "alice", "updateTime": "2026-03-03T10:00:00Z", "updatedBy": "alice", "databaseName": "sales", "tableName": "customers", "columns": ["customer_id", "name", "email"]}],
+        "externalUsers": [{"userId": 7, "username": "acme-analyst", "clientId": "client-acme", "companyName": "Acme", "permissions": ["READ"], "sharedOn": "2026-03-04T00:00:00Z", "validTill": "2027-03-03T00:00:00Z"}]},
+    {"dataShareId": "ds-002", "dataShareName": "Supplier spend", "isShared": False, "createdAt": "2026-06-01T08:00:00Z", "updatedAt": "2026-06-01T08:00:00Z", "createdBy": "bob", "keywords": ["procurement"], "tags": [],
+        "expiryTime": "2026-12-31T00:00:00Z", "summary": "Spend per supplier, quarterly", "termsOfUse": "",
+        "assets": [{"resourceId": "res-2", "guid": "tbl-suppliers", "createTime": "2026-06-01T08:00:00Z", "createdBy": "bob", "updateTime": "2026-06-01T08:00:00Z", "updatedBy": "bob", "databaseName": "finance", "tableName": "suppliers", "columns": ["supplier_id", "spend_usd"]}],
+        "externalUsers": []},
+    {"dataShareId": "ds-003", "dataShareName": "Marketing campaigns", "isShared": True, "createdAt": "2026-09-15T12:00:00Z", "updatedAt": "2026-09-15T12:00:00Z", "createdBy": "alice", "keywords": ["marketing"], "tags": [],
+        "expiryTime": None, "summary": "", "termsOfUse": "",
+        "assets": [{"resourceId": "res-3", "guid": "tbl-campaigns", "createTime": "2026-09-15T12:00:00Z", "createdBy": "alice", "updateTime": "2026-09-15T12:00:00Z", "updatedBy": "alice", "databaseName": "marketing", "tableName": "campaigns", "columns": []}],
+        "externalUsers": [{"userId": 9, "username": "agency-ops", "clientId": "client-agency", "companyName": "Bright Agency", "permissions": ["READ"], "sharedOn": "2026-09-16T00:00:00Z", "validTill": "2026-12-31T00:00:00Z"}]},
+]
+DC_FGAC = {"sales.customers": {"fgacEnabled": True, "policies": ["pii-mask-email", "row-filter-region"]}, "finance.suppliers": {"fgacEnabled": False, "policies": []}}
+DC_TAGS = [
+    {"qualifiedName": "sales.customers@cm", "tags": ["dp_name", "dp_email"], "profiledAt": "2026-10-20T00:00:00Z"},
+    {"qualifiedName": "sales.customers.email@cm", "tags": ["dp_email"], "profiledAt": "2026-10-20T00:00:00Z"},
+    {"qualifiedName": "finance.suppliers.iban@cm", "tags": ["dp_iban"], "profiledAt": "2026-09-01T00:00:00Z"},
+]
+
+
+@app.post("/api/v1/datacatalog/{operation}")
+async def cdp_datacatalog(operation: str, request: Request):
+    if not cdp_authenticated(request):
+        return cdp_error(401, "UNAUTHENTICATED", "The request signature is invalid or the API key is unknown")
+    try:
+        body = await request.json()
+    except ValueError:
+        return cdp_error(400, "INVALID_ARGUMENT", "Request body must be JSON")
+    body = body or {}
+    if not body.get("datalakeCrn"):
+        return cdp_error(400, "INVALID_ARGUMENT", "datalakeCrn is required")
+    if body["datalakeCrn"] != DC_DATALAKE:
+        return cdp_error(404, "NOT_FOUND", f"Data Lake {body['datalakeCrn']} was not found")
+    if operation != "getSuggestedTags":
+        if not body.get("environmentCrn"):
+            return cdp_error(400, "INVALID_ARGUMENT", "environmentCrn is required")
+        if body["environmentCrn"] != DC_ENV:
+            return cdp_error(404, "NOT_FOUND", f"Environment {body['environmentCrn']} was not found")
+    if operation == "listDataShares":
+        shares = [s for s in DC_SHARES if not body.get("name") or body["name"].lower() in s["dataShareName"].lower()]
+        size = int(body.get("pageSize") or 100)
+        start = int(body.get("startingToken") or 0)
+        page = [{k: s[k] for k in ("dataShareId", "dataShareName", "isShared", "createdAt", "createdBy", "keywords", "expiryTime")} for s in shares[start:start + size]]
+        out = {"dataShares": page}
+        if start + size < len(shares):
+            out["nextToken"] = str(start + size)
+        return out
+    if operation == "getDataShare":
+        found = next((s for s in DC_SHARES if s["dataShareId"] == body.get("dataShareId")), None)
+        return found or cdp_error(404, "NOT_FOUND", f"Data Share {body.get('dataShareId')} was not found")
+    if operation == "getFgacStatusByAssets":
+        assets = body.get("assets") or []
+        if not assets:
+            return cdp_error(400, "INVALID_ARGUMENT", "assets is required")
+        return {"listOfFgacStatus": {f"{a['databaseName']}.{a['tableName']}": DC_FGAC.get(f"{a['databaseName']}.{a['tableName']}", {"fgacEnabled": False, "policies": [], "message": "Table not found in Ranger"}) for a in assets}}
+    if operation == "getSuggestedTags":
+        items = DC_TAGS
+        if body.get("tableFQN"):
+            base = body["tableFQN"].split("@")[0]
+            items = [t for t in items if t["qualifiedName"] == body["tableFQN"] or t["qualifiedName"].startswith(base + ".")]
+        if body.get("columnFQN"):
+            items = [t for t in items if t["qualifiedName"] == body["columnFQN"]]
+        if body.get("profiledSince"):
+            items = [t for t in items if t["profiledAt"] >= body["profiledSince"][:19].ljust(20, "Z") or t["profiledAt"] >= body["profiledSince"]]
+        return {"suggestedTags": [{"qualifiedName": t["qualifiedName"], "tags": t["tags"]} for t in items]}
+    return cdp_error(404, "NOT_FOUND", f"Unknown operation {operation}")

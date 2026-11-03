@@ -480,7 +480,11 @@ the Iceberg namespaces and tables it maintains, the compaction, snapshot-expiry
 and orphan-cleanup policies with their decoded schedules and arguments, which
 tables each policy covers, why a table is paused or what its last task did, and
 the tasks that ran. It brought the `cdp-apikey` connection mode above; set the
-Data Hub CRN once in the tool configuration and agents need not pass it. Editing a seed makes a
+Data Hub CRN once in the tool configuration and agents need not pass it. The
+tenth seed, `cdp_datacatalog` (4 tools), completes the catalogue backlog: the
+Data Shares a Data Lake publishes with their tables, columns, external readers
+and expiry, whether tables carry fine-grained Ranger policies before they are
+shared, and the sensitivity tags the Data Compliance profiler suggests. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored
