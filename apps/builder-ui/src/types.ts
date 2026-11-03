@@ -11,7 +11,7 @@ export function toolLabel(tool: ToolSpec): { method: string; subtitle: string } 
   return tool.kind === 'python' ? { method: 'PY', subtitle: `${tool.pack}.${tool.function}` } : { method: tool.method, subtitle: tool.path };
 }
 export type Tool = ToolSpec & { id: string; revision: number; validated: boolean; tested: boolean; published: boolean; test_summary: { success: boolean; duration_ms: number; tested_at: string } | null };
-export type AuthMode = 'none' | 'static' | 'basic' | 'forward-token' | 'proxy-doas' | 's3-sigv4';
+export type AuthMode = 'none' | 'static' | 'basic' | 'forward-token' | 'proxy-doas' | 's3-sigv4' | 'cdp-apikey';
 export type Protocol = 'rest' | 'webhdfs' | 's3' | 'mcp';
 export type ProbeSummary = { success: boolean; message: string; pack: string | null; checked_at: string; duration_ms: number };
 export type JsonSchema = { type?: string; properties?: Record<string, JsonSchema & { description?: string }>; required?: string[]; [key: string]: unknown };

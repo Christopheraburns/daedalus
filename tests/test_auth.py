@@ -24,6 +24,39 @@ def unwrap(result):
     return result.get("structuredContent") or json.loads(result["content"][0]["text"])
 
 
+def test_cdp_api_key_signing():
+    """CDP request signing V1 as the cdp CLI does it: the string to sign, the two headers and both key types."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ed25519, padding
+    seed = bytes(range(32))
+    signer = auth.cdp_auth({"secret_ref": "FACTORY_SECRET_CDP"}, {"FACTORY_SECRET_CDP": "key-id-1:" + base64.b64encode(seed).decode()})
+    assert signer.method == "ed25519v1" and signer.access_key_id == "key-id-1"
+    request = httpx.Request("POST", "https://api.us-west-1.cdp.cloudera.com/api/v1/lakehouseopt/listEnvironments", json={"pageSize": 5})
+    signed = next(signer.auth_flow(request))
+    date = signed.headers["x-altus-date"]
+    assert date.endswith(" GMT") and date.count(",") == 1
+    metadata, signature = signed.headers["x-altus-auth"].split(".")
+    assert json.loads(base64.urlsafe_b64decode(metadata)) == {"access_key_id": "key-id-1", "auth_method": "ed25519v1"}
+    expected = f"POST\napplication/json\n{date}\n/api/v1/lakehouseopt/listEnvironments\ned25519v1"
+    ed25519.Ed25519PrivateKey.from_private_bytes(seed).public_key().verify(base64.urlsafe_b64decode(signature), expected.encode())
+    assert "authorization" not in signed.headers
+    # A legacy RSA key signs as rsav1 with SHA-256 PKCS#1 v1.5.
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    rsa_signer = auth.CdpAuth("key-id-2", pem.replace("\n", "\\n"))  # as an environment variable with escaped newlines
+    text = rsa_signer.string_to_sign("POST", "application/json", "Mon, 02 Nov 2026 10:00:00 GMT", "/api/v1/x")
+    key.public_key().verify(rsa_signer.sign(text), text.encode(), padding.PKCS1v15(), hashes.SHA256())
+    assert rsa_signer.method == "rsav1"
+    for bad in ("not-base64!", base64.b64encode(b"short").decode(), "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----"):
+        with pytest.raises(ValueError):
+            auth.CdpAuth("k", bad)
+    with pytest.raises(ValueError, match="ACCESS_KEY_ID:PRIVATE_KEY"):
+        auth.cdp_auth({"secret_ref": "FACTORY_SECRET_CDP"}, {"FACTORY_SECRET_CDP": "no-colon"})
+    with pytest.raises(ValueError, match="ACCESS_KEY_ID:PRIVATE_KEY"):
+        auth.validate({"auth_mode": "cdp-apikey", "secret_ref": "KEY"})
+    assert auth.credentials({"auth_mode": "cdp-apikey", "secret_ref": "FACTORY_SECRET_CDP"}, Caller("alice")) == ({}, {})
+
+
 def test_credentials_by_mode():
     user = Caller("alice", token="caller-token")
     assert auth.credentials({"auth_mode": "none"}, user) == ({}, {})

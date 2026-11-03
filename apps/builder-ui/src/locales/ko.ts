@@ -488,6 +488,7 @@ export const ko: Record<Key, string> = {
   doas_parameter: 'doAs 매개변수',
   auth_help_proxy: 'Python 팩 도구 전용입니다. 요청에 doAs=<호출자>가 포함되며, Kerberos 교환은 대상 클러스터에서 통합됩니다.',
   auth_s3: 'S3 액세스 키 (Ozone S3 Gateway, MinIO, AWS)',
+  auth_cdp: 'CDP API 키 (Cloudera 컨트롤 플레인)',
   protocol: '프로토콜',
   protocol_rest: 'REST API',
   protocol_webhdfs: 'WebHDFS (HDFS 또는 HttpFS를 통한 Ozone)',
@@ -509,4 +510,5 @@ export const ko: Record<Key, string> = {
   incompatible_connection: '이 도구에는 {protocol} 연결이 필요합니다. {name}은(는) 해당 연결이 아닙니다.',
   status_failed: '실패',
   auth_help_s3: 'Python 팩 도구 전용입니다. 참조된 FACTORY_SECRET_* 변수를 서버 애플리케이션에서 ACCESS_KEY:SECRET_KEY 형식으로 설정하세요. 모든 요청은 AWS 서명 버전 4로 서명됩니다.',
+  auth_help_cdp: 'Python 팩 도구 전용입니다. 참조된 FACTORY_SECRET_* 변수를 서버 애플리케이션에서 ACCESS_KEY_ID:PRIVATE_KEY 형식으로 설정하세요. 두 값은 CDP 콘솔에서 API 키를 생성할 때 제공되는 자격 증명 파일에 있습니다(개인 키는 44자 Ed25519 시드이며 RSA PEM 키도 사용할 수 있습니다). 모든 요청은 CDP 요청 서명 V1로 서명됩니다. 기본 URL은 해당 리전의 컨트롤 플레인입니다(예: https://api.us-west-1.cdp.cloudera.com).',
 };

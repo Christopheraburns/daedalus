@@ -63,9 +63,10 @@ class ToolContext:
         connection's authentication mode requires for this caller (see factory.auth)."""
         if not self.connection:
             raise ValueError("This tool requires a connection")
-        from ..auth import credentials, s3_auth
+        from ..auth import cdp_auth, credentials, s3_auth
         headers, params = credentials(self.connection, self.caller)
-        signer = s3_auth(self.connection, self.config.get("region", "us-east-1")) if self.connection.get("auth_mode") == "s3-sigv4" else None
+        mode = self.connection.get("auth_mode")
+        signer = s3_auth(self.connection, self.config.get("region", "us-east-1")) if mode == "s3-sigv4" else cdp_auth(self.connection) if mode == "cdp-apikey" else None
         return httpx.Client(base_url=self.connection["base_url"].rstrip("/"), headers=headers, params=params, auth=signer, timeout=timeout, trust_env=False, follow_redirects=False)
 
 

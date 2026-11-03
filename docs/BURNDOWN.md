@@ -14,7 +14,7 @@ nobody asked for. Each pack below is one seed, tested against a fake of its API
 in the mock service, with real-endpoint verification recorded when the customer
 environment allows it.
 
-## 1. Tool packs to ship as seeds (151 `keep` tools, 133 provided so far)
+## 1. Tool packs to ship as seeds (151 `keep` tools, 147 provided so far)
 
 Order follows the customer's goal: files first, then who-may-see-what, then the
 catalogue, then Ozone inventory and table maintenance.
@@ -29,7 +29,7 @@ catalogue, then Ozone inventory and table maintenance.
 | 6 | `atlas_glossary` | 13 | Atlas v2 glossary | [x] 2026-10-30: glossaries (list with name filter, one, detailed), categories (full, names, one, parent and children, its terms), terms (full, names, one, related terms by relation, assigned entities). Same `prefix` and identity model; glossary objects are public to Atlas users while assigned entities follow the caller's view. The Atlas fake gained two glossaries with a category hierarchy, related terms and term assignments. |
 | 7 | `atlas_types` | 5 | Atlas v2 types | [x] 2026-11-02: type names by category, service type or name part; full definitions filtered by category, super type or service type; one type of any category (enum values, struct attributes, relationship ends, business metadata applicability); an entity type with its inherited attributes marked by origin, its relationship attributes and a DSL hint for atlas_discovery; a classification with the entity types it may be applied to. Same `prefix` model; types are not identity-filtered. The Atlas fake gained a type system (nine entity types with inheritance, three classifications, an enum, a struct, four relationships and a business metadata type absent on the old prefix). |
 | 8 | `ozone_recon` | 13 | Ozone Recon | [x] 2026-11-02: volumes and buckets with quotas, ACLs, layout and replication (paged with Recon's prevKey), keys under a prefix filtered by replication type, size and creation time, what a path is and what it holds, disk usage by child largest first (files and replicated sizes on request), quota usage, file size distribution in size bands, cluster state, storage distribution per datanode, file counts per bucket and band, open-key and pending-deletion summaries. Flexible by configuration: `prefix` (direct or Knox), connection auth none/basic/forward-token, `simple_user` for a Recon whose simple authentication refuses anonymous callers (caller's name or a fixed one), tolerance for Recon before key listing, the storage distribution and the deleted-directory summary existed, and for the older flat namespace summary shape. The fake serves three prefixes (anonymous simple, Knox, old with user.name) over three volumes, four buckets and six keys. |
-| 9 | `cdp_lakehouseopt` | 14 | CDP Lakehouse Optimizer | [ ] environments, namespaces, tables, policies, associations, tasks (reads) |
+| 9 | `cdp_lakehouseopt` | 14 | CDP Lakehouse Optimizer | [x] 2026-11-02: environments with their Optimizer Data Hub CRN, namespaces, table names and tables with status, policies (list, names, one in full with decoded arguments and associations), a table's policies and its status explanation (paused since and why, or the last task's actions), associations by policy (tables, namespaces and tables with flags, the whole overview), tasks with decoded details and paging. Needs the new `cdp-apikey` connection mode (section 5). `datahub_crn` in the tool configuration spares agents the CRN on every call. The control plane fake verifies the Ed25519 signature of every request. |
 | 10 | `cdp_datacatalog` | 4 | CDP Data Catalog | [ ] data shares, FGAC status, suggested tags |
 
 Each pack also needs: a fake of its API in `services/factory/mock_api.py` for
@@ -99,6 +99,13 @@ time in the project.
   non-Cloudera REST APIs with local or LDAP users. Also: checking a connection
   now runs the probe of a pack whose tools use it, so Ranger connections are
   checked by the Ranger probe rather than the generic REST one.
+- [x] **CDP API key mode** (`cdp-apikey`, 2026-11-02): `FACTORY_SECRET_<NAME>` holding
+  `ACCESS_KEY_ID:PRIVATE_KEY` from the credentials file the CDP console issues; every
+  request to the control plane is signed per CDP request signing V1 (`x-altus-date`,
+  `x-altus-auth`), Ed25519 seeds as `ed25519v1` and RSA PEM keys as `rsav1`, using the
+  `cryptography` library already in the runtime. Python pack tools only; the gateway
+  cannot sign for REST tools, and the Builder says so when such a tool is tested.
+  Needed by the Lakehouse Optimizer and Data Catalog packs and any other CDP service.
 - [ ] **Kerberos SPNEGO mode** (`kerberos`): a service keytab from a secret
   reference, a ticket obtained in the Server process, SPNEGO negotiation per
   request. Needed for Ranger, WebHDFS and Atlas on Kerberized clusters without

@@ -93,8 +93,8 @@ def validate_tool(spec, connection, allowed, resolver=None):
     validate_connection(connection, allowed)
     if connection.get("protocol", "rest") != "rest":
         raise ValueError(f"REST tools need a rest connection; {connection['name']} is {connection['protocol']}")
-    if connection.get("auth_mode") in {"proxy-doas", "s3-sigv4"}:
-        raise ValueError("Proxy (doAs) and S3 connections serve Python pack tools only; the gateway cannot sign or obtain tickets for REST tools")
+    if connection.get("auth_mode") in {"proxy-doas", "s3-sigv4", "cdp-apikey"}:
+        raise ValueError("Proxy (doAs), S3 and CDP API key connections serve Python pack tools only; the gateway cannot sign requests or obtain tickets for REST tools")
     path = spec["path"]
     if not re.fullmatch(r"/(?:[A-Za-z0-9_{}./-])*", path) or path.startswith("//") or any(p in {".", ".."} for p in path.split("/")):
         raise ValueError("Use a relative API path with named {parameters}; URLs, query strings, and traversal are unsupported")

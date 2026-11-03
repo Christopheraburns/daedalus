@@ -340,6 +340,8 @@ API hosts an SDK-built upstream at `http://mock-api:8080/upstream/mcp`. Each con
 | `basic` | `Authorization: Basic <user:password>` | a `FACTORY_SECRET_*` variable holding `user:password`; Python and REST tools alike (Ranger, Atlas, Recon, LDAP-backed APIs) |
 | `forward-token` | the caller's own bearer token | the client's request; requires caller identity below |
 | `proxy-doas` | `doAs=<caller>` as a fixed service principal (Python tools only) | keytab reference; the Kerberos exchange is integrated per cluster |
+| `s3-sigv4` | AWS Signature Version 4 on every request (Python tools only) | a `FACTORY_SECRET_*` variable holding `ACCESS_KEY:SECRET_KEY` (Ozone S3 Gateway, MinIO, AWS) |
+| `cdp-apikey` | CDP request signing V1: `x-altus-date` and `x-altus-auth` on every request (Python tools only) | a `FACTORY_SECRET_*` variable holding `ACCESS_KEY_ID:PRIVATE_KEY` from the CDP console's credentials file; Ed25519 seeds sign as `ed25519v1`, RSA PEM keys as `rsav1` |
 
 Python tools get this through `ctx.client()`; REST tools get the equivalent
 agentgateway backend policy, with static secrets written as 0600 files per
@@ -472,7 +474,13 @@ distributions, open and pending-deletion keys, and the cluster's datanodes,
 containers and storage. Recon's own authentication varies by deployment, so the
 pack takes the connection's mode (none, basic or forward-token through Knox) and
 a `simple_user` setting for a Recon whose simple authentication wants a
-`user.name`. Editing a seed makes a
+`user.name`. The ninth seed, `cdp_lakehouseopt` (14 tools), reads Cloudera
+Lakehouse Optimizer through the CDP control plane: which environments run it,
+the Iceberg namespaces and tables it maintains, the compaction, snapshot-expiry
+and orphan-cleanup policies with their decoded schedules and arguments, which
+tables each policy covers, why a table is paused or what its last task did, and
+the tasks that ran. It brought the `cdp-apikey` connection mode above; set the
+Data Hub CRN once in the tool configuration and agents need not pass it. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored

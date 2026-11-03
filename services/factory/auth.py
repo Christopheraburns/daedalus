@@ -16,10 +16,17 @@ for declarative HTTP tools (see gateway.target_policies).
     s3-sigv4       an S3 access key pair (Ozone S3 Gateway, MinIO, AWS) from the
                    environment as FACTORY_SECRET_<NAME>="ACCESS_KEY:SECRET_KEY";
                    every request is signed with AWS Signature Version 4
+    cdp-apikey     a Cloudera CDP API key from the environment as
+                   FACTORY_SECRET_<NAME>="ACCESS_KEY_ID:PRIVATE_KEY" (the two values in the
+                   credentials file the CDP console generates); every request to the control
+                   plane is signed per CDP request signing V1 (x-altus-date, x-altus-auth)
 """
 import base64
+import binascii
 import datetime
+import email.utils
 import hashlib
+import json
 import hmac
 import os
 import re
@@ -27,7 +34,7 @@ from urllib.parse import quote
 
 import httpx
 
-MODES = ("none", "static", "basic", "forward-token", "proxy-doas", "s3-sigv4")
+MODES = ("none", "static", "basic", "forward-token", "proxy-doas", "s3-sigv4", "cdp-apikey")
 SECRET_REF = re.compile(r"^FACTORY_SECRET_[A-Z0-9_]{1,60}$")
 
 
@@ -41,6 +48,8 @@ def validate(connection):
         raise ValueError("Basic authentication needs a secret reference named FACTORY_SECRET_<NAME> whose value is user:password")
     if mode == "s3-sigv4" and not SECRET_REF.match(connection.get("secret_ref", "")):
         raise ValueError("S3 authentication needs a secret reference named FACTORY_SECRET_<NAME> whose value is ACCESS_KEY:SECRET_KEY")
+    if mode == "cdp-apikey" and not SECRET_REF.match(connection.get("secret_ref", "")):
+        raise ValueError("CDP API key authentication needs a secret reference named FACTORY_SECRET_<NAME> whose value is ACCESS_KEY_ID:PRIVATE_KEY")
     if mode == "proxy-doas":
         if not connection.get("proxy_principal"):
             raise ValueError("Proxy authentication needs the service principal that acts for callers")
@@ -67,8 +76,8 @@ def credentials(connection, caller, environ=None):
         # Live servers with caller identity always have a token; Builder tests and loopback probes run without
         # one, and like REST tools they send no credential rather than inventing one.
         return ({"Authorization": f"Bearer {caller.token}"}, {}) if caller.token else ({}, {})
-    if mode == "s3-sigv4":
-        return {}, {}  # signing happens per request; see s3_auth()
+    if mode in ("s3-sigv4", "cdp-apikey"):
+        return {}, {}  # signing happens per request; see s3_auth() and cdp_auth()
     if mode == "proxy-doas":
         # The HTTP shape is settled: the request carries doAs=<caller>; the service identity itself
         # needs a Kerberos ticket from the keytab, which only the target cluster can issue.
@@ -122,4 +131,64 @@ class SigV4Auth(httpx.Auth):
             key = hmac.new(key, part.encode(), hashlib.sha256).digest()
         signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
         request.headers["Authorization"] = f"AWS4-HMAC-SHA256 Credential={self.access_key}/{scope}, SignedHeaders={';'.join(signed)}, Signature={signature}"
+        yield request
+
+
+def cdp_auth(connection, environ=None):
+    """An httpx auth object that signs requests for a cdp-apikey connection."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(connection["secret_ref"], "")
+    if ":" not in value:
+        raise ValueError(f"Secret {connection['secret_ref']} must be set to ACCESS_KEY_ID:PRIVATE_KEY in the Server application's environment")
+    access_key_id, private_key = value.split(":", 1)
+    return CdpAuth(access_key_id.strip(), private_key)
+
+
+def load_cdp_key(private_key):
+    """The signing key and CDP method name for a CDP API key's private part: the 44-character base64 Ed25519 seed the
+    CDP console issues (ed25519v1), or an RSA private key in PEM form (rsav1, the legacy key type)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
+    text = private_key.replace("\\n", "\n").strip()
+    if text.startswith("-----BEGIN"):
+        try:
+            key = serialization.load_pem_private_key(text.encode(), password=None)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("The CDP private key is not a readable unencrypted PEM key") from exc
+        if not isinstance(key, rsa.RSAPrivateKey):
+            raise ValueError("CDP API keys are Ed25519 seeds or RSA PEM keys")
+        return key, "rsav1"
+    try:
+        seed = base64.b64decode(text, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("The CDP private key must be the 44-character base64 seed from the API key credentials file, or an RSA PEM key") from exc
+    if len(seed) != 32:
+        raise ValueError("The CDP private key must be the 44-character base64 seed from the API key credentials file, or an RSA PEM key")
+    return ed25519.Ed25519PrivateKey.from_private_bytes(seed), "ed25519v1"
+
+
+class CdpAuth(httpx.Auth):
+    """CDP control plane request signing V1, the scheme the cdp CLI uses: x-altus-date carries the request time and
+    x-altus-auth carries the access key ID, the signing method and a signature over the method, content type, date,
+    path and signing method, each on its own line."""
+
+    def __init__(self, access_key_id, private_key):
+        self.access_key_id = access_key_id
+        self.key, self.method = load_cdp_key(private_key)
+
+    def string_to_sign(self, method, content_type, date, path):
+        return "\n".join([method.upper(), content_type, date, path, self.method])
+
+    def sign(self, text):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        data = text.encode("utf-8")
+        return self.key.sign(data) if self.method == "ed25519v1" else self.key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+
+    def auth_flow(self, request):
+        date = email.utils.formatdate(usegmt=True)
+        signature = self.sign(self.string_to_sign(request.method, request.headers.get("content-type", ""), date, request.url.path))
+        metadata = json.dumps({"access_key_id": self.access_key_id, "auth_method": self.method}).encode("utf-8")
+        request.headers["x-altus-date"] = date
+        request.headers["x-altus-auth"] = base64.urlsafe_b64encode(metadata).decode() + "." + base64.urlsafe_b64encode(signature).decode()
         yield request

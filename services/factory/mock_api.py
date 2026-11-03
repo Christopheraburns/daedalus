@@ -87,7 +87,7 @@ def create_ticket(body: Ticket):
 @app.get("/fixture/echo")
 def echo(request: Request):
     """What the backend received: lets tests confirm which credential a connection sent."""
-    return {"authorization": request.headers.get("authorization"), "query": dict(request.query_params)}
+    return {"authorization": request.headers.get("authorization"), "query": dict(request.query_params), "altus_auth": request.headers.get("x-altus-auth")}
 
 
 @app.post("/ratelimited/mcp")
@@ -1673,3 +1673,202 @@ def recon_api(rest, request, features):
             "usedSpaceBreakdown": {"openKeyBytes": {"openKeyAndFileBytes": 31457280, "multipartOpenKeyBytes": 0, "totalOpenKeyBytes": 31457280}, "finalizedKeyBytes": total},
             "dataNodeUsage": RECON_DATANODES}
     return html_404
+
+
+# ---- CDP control plane fake: Cloudera Lakehouse Optimizer ----------------------------------------------------------
+# Signed POSTs as the cdp CLI sends them: x-altus-auth carries base64url(JSON{access_key_id, auth_method}) "." base64url(
+# signature) over "METHOD\ncontent-type\nx-altus-date\npath\nauth_method". One Ed25519 API key is accepted; its seed is
+# fixed so tests can hold the matching private key. Errors follow the control plane's {"code", "message"} shape.
+CDP_ACCESS_KEY_ID = "e6a3f9c1-daedalus-test-key"
+CDP_SEED = bytes(range(32))
+CDP_ENVIRONMENTS = [
+    {"environmentName": "prod-env", "environmentCrn": "crn:cdp:environments:us-west-1:tenant:environment:prod", "isCloEnabled": True, "datahubName": "prod-clo", "datahubCrn": "crn:cdp:datahub:us-west-1:tenant:cluster:clo-prod", "cloudPlatform": "AWS", "status": "AVAILABLE"},
+    {"environmentName": "dev-env", "environmentCrn": "crn:cdp:environments:us-west-1:tenant:environment:dev", "isCloEnabled": False, "datahubName": None, "datahubCrn": None, "cloudPlatform": "AWS", "status": None},
+    {"environmentName": "eu-env", "environmentCrn": "crn:cdp:environments:eu-1:tenant:environment:eu", "isCloEnabled": True, "datahubName": "eu-clo", "datahubCrn": "crn:cdp:datahub:eu-1:tenant:cluster:clo-eu", "cloudPlatform": "AZURE", "status": "AVAILABLE"},
+]
+CDP_PROD = "crn:cdp:datahub:us-west-1:tenant:cluster:clo-prod"
+CDP_EU = "crn:cdp:datahub:eu-1:tenant:cluster:clo-eu"
+CDP_TABLES = {  # datahub → namespace → table → (policies, status, last execution)
+    CDP_PROD: {
+        "sales": {"orders": (["daily-compaction"], "SUCCESS", 1793005000000), "customers": (["daily-compaction", "weekly-expire-snapshots"], "WARNING", 1792900000000)},
+        "finance": {"ledger": (["weekly-expire-snapshots"], "USER_PAUSED", 1790000000000)},
+    },
+    CDP_EU: {"marketing": {}},
+}
+CDP_POLICIES = {  # name → (default, scope, created, arguments)
+    "daily-compaction": (False, "Namespace", 1772000000000, {"actions": ["rewrite_data_files"], "schedule": "0 2 * * *", "timezone": "UTC", "targetFileSizeBytes": 536870912}),
+    "weekly-expire-snapshots": (True, "Catalog", 1770000000000, {"actions": ["expire_snapshots", "remove_orphan_files"], "schedule": "0 3 * * 0", "timezone": "UTC", "retainLast": 5}),
+    "monthly-orphan-cleanup": (False, "Namespace", 1785000000000, {"actions": ["remove_orphan_files"], "schedule": "0 4 1 * *", "timezone": "UTC"}),
+}
+CDP_TASKS = {
+    "sales": [
+        {"status": "COMPLETED", "taskId": "6b1a0e2c-0000-4000-8000-000000000001", "policy": "daily-compaction", "catalog": "spark_catalog", "namespace": "sales", "table": "orders", "createdAt": 1793005000000, "details": {"action": "rewrite_data_files", "rewrittenFiles": 42, "addedFiles": 3, "durationSeconds": 184}},
+        {"status": "COMPLETED", "taskId": "6b1a0e2c-0000-4000-8000-000000000002", "policy": "daily-compaction", "catalog": "spark_catalog", "namespace": "sales", "table": "customers", "createdAt": 1792900000000, "details": {"action": "rewrite_data_files", "rewrittenFiles": 7, "addedFiles": 1, "durationSeconds": 51}},
+        {"status": "FAILED", "taskId": "6b1a0e2c-0000-4000-8000-000000000003", "policy": "weekly-expire-snapshots", "catalog": "spark_catalog", "namespace": "sales", "table": "customers", "createdAt": 1792850000000, "details": {"action": "expire_snapshots", "error": "Snapshot 8812 is referenced by a branch"}},
+        {"status": "SUBMITTED", "taskId": "6b1a0e2c-0000-4000-8000-000000000004", "policy": "daily-compaction", "catalog": "spark_catalog", "namespace": "sales", "table": "orders", "createdAt": 1793090000000, "details": {"action": "rewrite_data_files"}},
+    ],
+    "finance": [],
+}
+
+
+def cdp_public_key():
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    return ed25519.Ed25519PrivateKey.from_private_bytes(CDP_SEED).public_key()
+
+
+def cdp_error(status, code, message):
+    return JSONResponse({"code": code, "message": message}, status_code=status)
+
+
+def cdp_authenticated(request):
+    header, date = request.headers.get("x-altus-auth", ""), request.headers.get("x-altus-date", "")
+    metadata, _, signature = header.partition(".")
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(metadata + "=" * (-len(metadata) % 4)))
+        if claims.get("access_key_id") != CDP_ACCESS_KEY_ID or claims.get("auth_method") != "ed25519v1" or not date:
+            return False
+        to_sign = "\n".join([request.method.upper(), request.headers.get("content-type", ""), date, request.url.path, "ed25519v1"])
+        cdp_public_key().verify(base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4)), to_sign.encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def cdp_b64(value):
+    return base64.b64encode(json.dumps(value).encode()).decode()
+
+
+def cdp_table_status(policies, status, last):
+    return {"status": status, "policies": policies, "lastExecutionEpoch": last}
+
+
+@app.post("/api/v1/lakehouseopt/{operation}")
+async def cdp_lakehouseopt(operation: str, request: Request):
+    if not cdp_authenticated(request):
+        return cdp_error(401, "UNAUTHENTICATED", "The request signature is invalid or the API key is unknown")
+    try:
+        body = await request.json()
+    except ValueError:
+        return cdp_error(400, "INVALID_ARGUMENT", "Request body must be JSON")
+    body = body or {}
+    if operation == "listEnvironments":
+        size = int(body.get("pageSize") or 100)
+        start = 0 if body.get("pageToken") in (None, "", "ALL") else int(body["pageToken"])
+        page = CDP_ENVIRONMENTS[start:start + size]
+        out = {"environments": page, "totalEnvironments": len(CDP_ENVIRONMENTS)}
+        if start + size < len(CDP_ENVIRONMENTS):
+            out["nextPageToken"] = str(start + size)
+        return out
+    crn = body.get("datahubCrn")
+    if not crn:
+        return cdp_error(400, "INVALID_ARGUMENT", "datahubCrn is required")
+    if crn not in CDP_TABLES:
+        return cdp_error(404, "NOT_FOUND", f"Data Hub {crn} was not found or is not a Lakehouse Optimizer Data Hub")
+    namespaces = CDP_TABLES[crn]
+
+    def need_namespace():
+        ns = body.get("namespace")
+        if ns not in namespaces:
+            return None, cdp_error(404, "NOT_FOUND", f"Namespace {ns} does not exist in catalog")
+        return ns, None
+
+    def need_policy():
+        name = body.get("policyName")
+        if name not in CDP_POLICIES:
+            return None, cdp_error(404, "NOT_FOUND", f"Policy {name} does not exist")
+        return name, None
+
+    def tables_with(policy):
+        return [(ns, t) for ns, tables in namespaces.items() for t, (policies, *_rest) in tables.items() if policy in policies]
+
+    if operation == "getNamespaces":
+        return {"namespaces": sorted(namespaces)}
+    if operation == "getTableNames":
+        ns, err = need_namespace()
+        return err or {"tables": sorted(namespaces[ns])}
+    if operation == "listTables":
+        ns, err = need_namespace()
+        return err or {"tables": [{"status": st, "namespace": ns, "tableName": t, "policies": pol, "lastExecutionTime": last} for t, (pol, st, last) in sorted(namespaces[ns].items())]}
+    if operation == "listPolicies":
+        ns = body.get("namespace")
+        if ns and ns not in namespaces:
+            return cdp_error(404, "NOT_FOUND", f"Namespace {ns} does not exist in catalog")
+        out = []
+        for name, (default, scope, created, _args) in CDP_POLICIES.items():
+            tables = [(n, t) for n, t in tables_with(name) if not ns or n == ns]
+            if ns and not tables:
+                continue
+            runs = [k for k in CDP_TASKS.get(ns, []) or sum(CDP_TASKS.values(), []) if k["policy"] == name]
+            out.append({"status": "UNAVAILABLE" if not tables else "ERROR" if any(k["status"] == "FAILED" for k in runs) else "SUCCESS", "policyName": name, "taskCount": len(runs), "tableCount": len(tables),
+                "creationTime": created, "lastExecutionTime": max((k["createdAt"] for k in runs), default=0), "isDefault": default})
+        return {"policies": out}
+    if operation == "getPolicyNames":
+        ns = body.get("namespace")
+        if ns != "*" and ns not in namespaces:
+            return cdp_error(404, "NOT_FOUND", f"Namespace {ns} does not exist in catalog")
+        return {"policyNames": sorted({p for n, tables in namespaces.items() if ns == "*" or n == ns for pol, *_ in tables.values() for p in pol})}
+    if operation == "getPolicy":
+        name, err = need_policy()
+        if err:
+            return err
+        default, scope, created, args = CDP_POLICIES[name]
+        tables = tables_with(name)
+        associations = []
+        for ns in sorted({n for n, _ in tables}):
+            rows = [{"name": t, "namespace": ns, "taskCount": len([k for k in CDP_TASKS.get(ns, []) if k["policy"] == name and k["table"] == t]), "lastExecutionTime": namespaces[ns][t][2], "version": "v1-" + name, "status": "PAUSED" if "PAUSED" in namespaces[ns][t][1] else "SUCCESS"} for n, t in sorted(tables) if n == ns]
+            associations.append({"namespace": ns, "status": "SUCCESS" if all(r["status"] == "SUCCESS" for r in rows) else "USER_PAUSED", "tableAssociations": rows})
+        runs = [k for k in sum(CDP_TASKS.values(), []) if k["policy"] == name]
+        return {"versions": ["v1-" + name], "policyDetail": {"version": "v1-" + name, "arguments": cdp_b64(args), "scope": scope, "associations": associations, "tableCount": len(tables), "creationTime": created, "lastExecutionTime": max((k["createdAt"] for k in runs), default=0)}}
+    if operation == "getTablePolicies":
+        ns, err = need_namespace()
+        if err:
+            return err
+        table = body.get("tableName")
+        if table not in namespaces[ns]:
+            return cdp_error(404, "NOT_FOUND", f"Table {ns}.{table} does not exist")
+        policies, status, last = namespaces[ns][table]
+        return {"policies": [{"status": status, "policyName": p, "taskCount": len([k for k in CDP_TASKS.get(ns, []) if k["policy"] == p and k["table"] == table]), "lastExecutionTime": last} for p in policies]}
+    if operation == "getTableStatusDetails":
+        ns, err = need_namespace()
+        if err:
+            return err
+        table, policy = body.get("tableName"), body.get("policyName")
+        if table not in namespaces[ns]:
+            return cdp_error(404, "NOT_FOUND", f"Table {ns}.{table} does not exist")
+        if body.get("status") not in ("UNAVAILABLE", "SUCCESS", "ERROR", "PAUSED"):
+            return cdp_error(400, "INVALID_ARGUMENT", "status must be one of UNAVAILABLE, SUCCESS, ERROR, PAUSED")
+        policies, status, last = namespaces[ns][table]
+        if "PAUSED" in status:
+            return {"pausedTable": {"message": "Table paused by user bob", "details": {"pausedSince": "2026-09-21T00:00:00Z", "reasons": ["Quarter-end close in progress"]}}}
+        runs = [k for k in CDP_TASKS.get(ns, []) if k["table"] == table and k["policy"] == policy and k["status"] in ("COMPLETED", "FAILED")]
+        if not runs:
+            return {}
+        recent = max(runs, key=lambda k: k["createdAt"])
+        return {"recentTask": {"actions": [{"action": recent["details"]["action"], "status": recent["status"]}], "policyName": policy, "tableName": table, "lastExecutionTime": recent["createdAt"]}}
+    if operation == "getAssociations":
+        name, err = need_policy()
+        return err or {"associations": [{"namespace": ns, "tables": sorted(t for n, t in tables_with(name) if n == ns)} for ns in sorted({n for n, _ in tables_with(name)})]}
+    if operation == "getAssociatedNamespaces":
+        name, err = need_policy()
+        return err or {"associatedNamespaces": [{"namespace": ns, "isAssociated": any(n == ns for n, _ in tables_with(name))} for ns in sorted(namespaces)]}
+    if operation == "getAssociatedTables":
+        name, err = need_policy()
+        return err or {"associatedTables": [{"namespace": ns, "tables": [{"tableName": t, "isAssociated": (ns, t) in tables_with(name)} for t in sorted(tables)]} for ns, tables in sorted(namespaces.items())]}
+    if operation == "getAssociationDetails":
+        direct = [{"namespace": ns, "status": "SUCCESS" if all(st == "SUCCESS" for _, st, _ in tables.values()) else "WARNING",
+            "tables": [{"tableName": t, "policies": pol, "lastExecutionEpoch": last, "status": st} for t, (pol, st, last) in sorted(tables.items())]} for ns, tables in sorted(namespaces.items()) if tables]
+        star = [{"catalog": "spark_catalog", "status": "SUCCESS", "namespaces": [{"namespace": ns, "status": "SUCCESS", "policies": ["weekly-expire-snapshots"]} for ns in sorted(namespaces)]}]
+        return {"directAssociation": direct, "starAssociation": star}
+    if operation == "listTasks":
+        ns, err = need_namespace()
+        if err:
+            return err
+        tasks = sorted(CDP_TASKS.get(ns, []), key=lambda k: -k["createdAt"])
+        size = int(body.get("pageSize") or 100)
+        start = int(body.get("pageToken") or 0)
+        page = [{**k, "details": cdp_b64(k["details"])} for k in tasks[start:start + size]]
+        out = {"tasks": page}
+        if start + size < len(tasks):
+            out["nextPageToken"] = str(start + size)
+        return out
+    return cdp_error(404, "NOT_FOUND", f"Unknown operation {operation}")

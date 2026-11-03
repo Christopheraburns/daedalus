@@ -484,6 +484,7 @@ export const en = {
   doas_parameter: "doAs parameter",
   auth_help_proxy: "Python pack tools only. Requests carry doAs=<caller>; the Kerberos exchange is integrated on the target cluster.",
   auth_s3: "S3 access key (Ozone S3 Gateway, MinIO, AWS)",
+  auth_cdp: "CDP API key (Cloudera control plane)",
   protocol: "Protocol",
   protocol_rest: "REST API",
   protocol_webhdfs: "WebHDFS (HDFS, or Ozone via HttpFS)",
@@ -505,5 +506,6 @@ export const en = {
   incompatible_connection: "This tool needs a {protocol} connection; {name} is not one.",
   status_failed: "Failed",
   auth_help_s3: "Python pack tools only. Set the referenced FACTORY_SECRET_* variable to ACCESS_KEY:SECRET_KEY on the Server application; every request is signed with AWS Signature Version 4.",
+  auth_help_cdp: "Python pack tools only. Set the referenced FACTORY_SECRET_* variable to ACCESS_KEY_ID:PRIVATE_KEY on the Server application, the two values from the credentials file the CDP console hands out when you generate an API key (the private key is the 44-character Ed25519 seed; an RSA PEM key also works). Every request is signed per CDP request signing V1. The base URL is the control plane for your region, such as https://api.us-west-1.cdp.cloudera.com.",
 } as const;
 export type Key = keyof typeof en;
