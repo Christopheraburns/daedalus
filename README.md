@@ -465,7 +465,14 @@ user; the assigned entities follow the caller's view. The seventh seed,
 definition, an entity type with every attribute it carries including the ones
 inherited from Asset and Referenceable, and a classification with the entity
 types it may be applied to, so an agent can write a correct DSL or filtered
-search before running it. Editing a seed makes a
+search before running it. The eighth seed, `ozone_recon` (13 tools), is the
+inventory and capacity view of an Ozone cluster through Recon: volumes, buckets
+and keys, what a path holds and how much space it uses, quotas, file size
+distributions, open and pending-deletion keys, and the cluster's datanodes,
+containers and storage. Recon's own authentication varies by deployment, so the
+pack takes the connection's mode (none, basic or forward-token through Knox) and
+a `simple_user` setting for a Recon whose simple authentication wants a
+`user.name`. Editing a seed makes a
 project copy that shadows it; the Builder flags the copy when a newer seed ships,
 and deleting the copy adopts it. *Project* packs are written by administrators in
 the Builder (TOOL PACKS → +), validated in an isolated subprocess on save, stored

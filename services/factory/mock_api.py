@@ -1404,3 +1404,272 @@ def atlas_types_api(parts, query, features):
             return atlas_error(400, "ATLAS-400-00-00B", f"Given type {parts[3]} doesn't match {ATLAS_TYPE_PATHS[parts[1]]}")
         return atlas_type_view(item)
     return html_404
+
+
+# ---- Ozone Recon fake -------------------------------------------------------------------------------------------------
+# Three prefixes: /api/v1 is a Recon with Hadoop simple authentication that allows anonymous callers;
+# /gateway/cdp-proxy/ozone-recon/api/v1 is Recon through Knox (Basic against the Ranger accounts or a Bearer JWT);
+# /recon-1/api/v1 is an older Recon whose simple authentication requires user.name, without key listing, the storage
+# distribution or the deleted-directory summary, and with the flat namespace summary shape. Recon does not filter by identity.
+RECON_RATIS = {"replicationType": "RATIS", "replicationFactor": "THREE", "requiredNodes": 3}
+RECON_EC = {"replicationType": "EC", "data": 6, "parity": 3, "ecChunkSize": 1048576, "codec": "RS", "requiredNodes": 9}
+RECON_VOLUMES = [
+    {"volume": "s3v", "owner": "hadoop", "admin": "hadoop", "quotaInBytes": -1, "quotaInNamespace": -1, "usedNamespace": 1, "creationTime": 1772000000000, "modificationTime": 1772000000000,
+        "acls": [{"type": "USER", "name": "hadoop", "scope": "ACCESS", "aclList": ["ALL"]}], "metadata": {}},
+    {"volume": "sales", "owner": "alice", "admin": "hadoop", "quotaInBytes": -1, "quotaInNamespace": -1, "usedNamespace": 2, "creationTime": 1772000000000, "modificationTime": 1780000000000,
+        "acls": [{"type": "USER", "name": "alice", "scope": "ACCESS", "aclList": ["ALL"]}, {"type": "GROUP", "name": "analysts", "scope": "ACCESS", "aclList": ["READ", "LIST"]}], "metadata": {}},
+    {"volume": "finance", "owner": "bob", "admin": "hadoop", "quotaInBytes": 10737418240, "quotaInNamespace": 1000, "usedNamespace": 1, "creationTime": 1772000000000, "modificationTime": 1772000000000,
+        "acls": [{"type": "USER", "name": "bob", "scope": "ACCESS", "aclList": ["ALL"]}], "metadata": {"department": "finance"}},
+]
+RECON_BUCKETS = [
+    {"volumeName": "s3v", "name": "landing", "bucketLayout": "OBJECT_STORE", "storageType": "DISK", "versioning": False, "owner": "hadoop", "quotaInBytes": -1, "quotaInNamespace": -1, "creationTime": 1772000000000, "modificationTime": 1793000000000,
+        "acls": [{"type": "USER", "name": "hadoop", "scope": "ACCESS", "aclList": ["ALL"]}]},
+    {"volumeName": "sales", "name": "orders", "bucketLayout": "FILE_SYSTEM_OPTIMIZED", "storageType": "DISK", "versioning": False, "owner": "alice", "quotaInBytes": -1, "quotaInNamespace": -1, "creationTime": 1772000000000, "modificationTime": 1793000000000,
+        "acls": [{"type": "USER", "name": "alice", "scope": "ACCESS", "aclList": ["ALL"]}]},
+    {"volumeName": "sales", "name": "archive", "bucketLayout": "FILE_SYSTEM_OPTIMIZED", "storageType": "ARCHIVE", "versioning": True, "owner": "alice", "quotaInBytes": -1, "quotaInNamespace": -1, "creationTime": 1772000000000, "modificationTime": 1772500000000,
+        "replicationConfigInfo": RECON_EC, "acls": [{"type": "USER", "name": "alice", "scope": "ACCESS", "aclList": ["ALL"]}]},
+    {"volumeName": "finance", "name": "ledger", "bucketLayout": "FILE_SYSTEM_OPTIMIZED", "storageType": "DISK", "versioning": False, "owner": "bob", "quotaInBytes": 5368709120, "quotaInNamespace": 500, "creationTime": 1772000000000, "modificationTime": 1792000000000,
+        "acls": [{"type": "USER", "name": "bob", "scope": "ACCESS", "aclList": ["ALL"]}]},
+]
+RECON_KEYS = [  # path, size, replication, created
+    ("/s3v/landing/upload.bin", 900, RECON_RATIS, 1793000000000),
+    ("/sales/orders/README.md", 2048, RECON_RATIS, 1780000000000),
+    ("/sales/orders/2026/01/orders.parquet", 52428800, RECON_RATIS, 1780100000000),
+    ("/sales/orders/2026/02/orders.parquet", 61865984, RECON_RATIS, 1793000000000),
+    ("/sales/archive/2019.tar", 1610612736, RECON_EC, 1772500000000),
+    ("/finance/ledger/gl.csv", 3145728, RECON_RATIS, 1792000000000),
+]
+RECON_CLUSTER_STATE = {"pipelines": 4, "totalDatanodes": 3, "healthyDatanodes": 3, "containers": 120, "missingContainers": 0, "openContainers": 8, "deletedContainers": 2, "volumes": 3, "buckets": 4, "keys": 6,
+    "keysPendingDeletion": 2, "deletedDirs": 1, "scmServiceId": "scm1", "omServiceId": "om1",
+    "storageReport": {"capacity": 3298534883328, "used": 5184168588, "remaining": 3200000000000, "committed": 8589934592, "minimumFreeSpace": 32985348833, "reserved": 60000000000, "filesystemCapacity": 3400000000000, "filesystemUsed": 100000000000, "filesystemAvailable": 3300000000000}}
+RECON_DATANODES = [{"datanodeUuid": f"dn-{i}", "hostName": f"dn{i}.example.com", "capacity": 1099511627776, "used": 1728056196, "remaining": 1066666666666, "committed": 2863311530, "minimumFreeSpace": 10995116277, "reserved": 20000000000,
+    "filesystemCapacity": 1133333333333, "filesystemUsed": 33333333333, "filesystemAvailable": 1100000000000} for i in (1, 2, 3)]
+RECON_OPEN = {"totalOpenKeys": 3, "totalReplicatedDataSize": 94371840, "totalUnreplicatedDataSize": 31457280}
+RECON_DELETED = {"totalDeletedKeys": 2, "totalReplicatedDataSize": 6291456, "totalUnreplicatedDataSize": 2097152}
+RECON_DELETED_DIRS = {"totalDeletedDirectories": 1}
+
+
+def recon_replicated(size, config):
+    return size * config["requiredNodes"] // (config.get("data") or 1) if config["replicationType"] == "EC" else size * config["requiredNodes"]
+
+
+def recon_key_record(path, size, config, created):
+    return {"key": path, "path": path, "size": size, "replicatedSize": recon_replicated(size, config), "replicationInfo": config, "creationTime": created, "modificationTime": created, "isKey": True}
+
+
+def recon_dirs():
+    found = set()
+    for path, *_ in RECON_KEYS:
+        parts = path.split("/")[1:]
+        for depth in range(3, len(parts)):
+            found.add("/" + "/".join(parts[:depth]))
+    return sorted(found)
+
+
+def recon_under(path):
+    prefix = "" if path == "/" else path
+    return [k for k in RECON_KEYS if k[0].startswith(prefix + "/")]
+
+
+def recon_parent(path):
+    return path.rsplit("/", 1)[0] or "/"
+
+
+def recon_kind(path):
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return "ROOT"
+    if len(parts) == 1:
+        return "VOLUME" if any(v["volume"] == parts[0] for v in RECON_VOLUMES) else "UNKNOWN"
+    if len(parts) == 2:
+        return "BUCKET" if any(b["volumeName"] == parts[0] and b["name"] == parts[1] for b in RECON_BUCKETS) else "UNKNOWN"
+    if any(k[0] == path for k in RECON_KEYS):
+        return "KEY"
+    return "DIRECTORY" if path in recon_dirs() else "UNKNOWN"
+
+
+def recon_bucket_record(b):
+    under = recon_under(f"/{b['volumeName']}/{b['name']}")
+    return {**b, "usedBytes": sum(k[1] for k in under), "usedNamespace": len(under) + len([d for d in recon_dirs() if d.startswith(f"/{b['volumeName']}/{b['name']}/")]), "snapshotUsedBytes": 0, "sourceVolume": None, "sourceBucket": None}
+
+
+def recon_summary(path, flat):
+    kind = recon_kind(path)
+    if kind == "UNKNOWN":
+        return {"status": "PATH_NOT_FOUND", "type": "UNKNOWN"} if flat else {"status": "PATH_NOT_FOUND", "path": path, "type": "UNKNOWN"}
+    parts = [p for p in path.split("/") if p]
+    under, dirs = recon_under(path), [d for d in recon_dirs() if path == "/" or d.startswith(path + "/")]
+    if kind == "ROOT":
+        stats, info = (len(RECON_VOLUMES), len(RECON_BUCKETS), len(dirs), len(under)), {}
+    elif kind == "VOLUME":
+        v = next(v for v in RECON_VOLUMES if v["volume"] == parts[0])
+        stats, info = (-1, len([b for b in RECON_BUCKETS if b["volumeName"] == parts[0]]), len(dirs), len(under)), {**v, "name": v["volume"]}
+    elif kind == "BUCKET":
+        b = recon_bucket_record(next(b for b in RECON_BUCKETS if b["volumeName"] == parts[0] and b["name"] == parts[1]))
+        stats, info = (-1, -1, len(dirs), len(under)), {**b, "metadata": {}}
+    elif kind == "DIRECTORY":
+        stats, info = (-1, -1, len(dirs), len(under)), {"name": parts[-1], "creationTime": min(k[3] for k in under), "modificationTime": max(k[3] for k in under), "metadata": {}}
+    else:
+        k = next(k for k in RECON_KEYS if k[0] == path)
+        stats, info = (-1, -1, -1, 0), {"name": parts[-1], "dataSize": k[1], "replicationConfig": k[2], "creationTime": k[3], "modificationTime": k[3], "metadata": {}}
+    if flat:
+        return {"status": "OK", "type": kind, "numVolume": stats[0], "numBucket": stats[1], "numDir": stats[2], "numKey": stats[3]}
+    return {"status": "OK", "path": path, "type": kind, "countStats": {"numVolume": stats[0], "numBucket": stats[1], "numDir": stats[2], "numKey": stats[3]}, "objectInfo": info}
+
+
+def recon_sizes(keys, replica):
+    return sum(k[1] for k in keys), (sum(recon_replicated(k[1], k[2]) for k in keys) if replica else -1)
+
+
+def recon_du(path, files, replica):
+    kind = recon_kind(path)
+    if kind == "UNKNOWN":
+        return {"status": "PATH_NOT_FOUND", "path": path, "size": 0, "sizeWithReplica": -1, "subPathCount": 0, "subPaths": [], "sizeDirectKey": 0}
+    if kind == "KEY":
+        k = next(k for k in RECON_KEYS if k[0] == path)
+        return {"status": "OK", "path": path, "size": k[1], "sizeWithReplica": recon_replicated(k[1], k[2]) if replica else -1, "subPathCount": 0, "subPaths": [], "sizeDirectKey": 0}
+    if kind == "ROOT":
+        children = [(f"/{v['volume']}", False) for v in RECON_VOLUMES]
+    elif kind == "VOLUME":
+        children = [(f"/{b['volumeName']}/{b['name']}", False) for b in RECON_BUCKETS if f"/{b['volumeName']}" == path]
+    else:
+        children = [(d, False) for d in recon_dirs() if recon_parent(d) == path] + ([(k[0], True) for k in RECON_KEYS if recon_parent(k[0]) == path] if files else [])
+    sub = []
+    for child, is_key in children:
+        keys = [k for k in RECON_KEYS if k[0] == child] if is_key else recon_under(child)
+        size, replicated = recon_sizes(keys, replica)
+        sub.append({"path": child, "size": size, "sizeWithReplica": replicated, "isKey": is_key})
+    sub.sort(key=lambda s: -s["size"])
+    size, replicated = recon_sizes(recon_under(path), replica)
+    direct = sum(k[1] for k in RECON_KEYS if recon_parent(k[0]) == path) if kind in ("BUCKET", "DIRECTORY") else 0
+    return {"status": "OK", "path": path, "size": size, "sizeWithReplica": replicated, "subPathCount": len(sub), "subPaths": sub, "sizeDirectKey": direct}
+
+
+def recon_quota(path):
+    kind = recon_kind(path)
+    parts = [p for p in path.split("/") if p]
+    if kind == "UNKNOWN":
+        return {"status": "PATH_NOT_FOUND", "allowed": 0, "used": 0}
+    if kind in ("DIRECTORY", "KEY"):
+        return {"status": "TYPE_NOT_APPLICABLE", "allowed": 0, "used": 0}
+    if kind == "ROOT":
+        allowed = sum(v["quotaInBytes"] for v in RECON_VOLUMES if v["quotaInBytes"] > 0) or -1
+    elif kind == "VOLUME":
+        allowed = next(v["quotaInBytes"] for v in RECON_VOLUMES if v["volume"] == parts[0])
+    else:
+        allowed = next(b["quotaInBytes"] for b in RECON_BUCKETS if b["volumeName"] == parts[0] and b["name"] == parts[1])
+    return {"status": "OK", "allowed": allowed, "used": sum(k[1] for k in recon_under(path))}
+
+
+def recon_bin(size):
+    return 0 if size <= 1024 else min(41, (size - 1).bit_length() - 10)
+
+
+def recon_dist(path):
+    kind = recon_kind(path)
+    if kind == "UNKNOWN":
+        return {"status": "PATH_NOT_FOUND", "dist": []}
+    if kind == "KEY":
+        return {"status": "TYPE_NOT_APPLICABLE", "dist": []}
+    dist = [0] * 42
+    for k in recon_under(path):
+        dist[recon_bin(k[1])] += 1
+    return {"status": "OK", "dist": dist}
+
+
+def recon_file_counts(volume, bucket, file_size):
+    rows = {}
+    for path, size, *_ in RECON_KEYS:
+        parts = path.split("/")[1:]
+        rows[(parts[0], parts[1], 1 << (10 + recon_bin(size)))] = rows.get((parts[0], parts[1], 1 << (10 + recon_bin(size))), 0) + 1
+    out = [{"volume": v, "bucket": b, "fileSize": s, "count": n} for (v, b, s), n in rows.items()
+        if (not volume or v == volume) and (not bucket or b == bucket) and (not file_size or s == 1 << (10 + recon_bin(file_size)))]
+    return out
+
+
+def recon_after(items, key, prev):
+    if not prev:
+        return items
+    names = [key(i) for i in items]
+    return items[names.index(prev) + 1:] if prev in names else [i for i in items if key(i) > prev]
+
+
+@app.api_route("/api/v1/{rest:path}", methods=["GET"])
+async def recon_direct(rest: str, request: Request):
+    return recon_api(rest, request, features=True)
+
+
+@app.api_route("/gateway/cdp-proxy/ozone-recon/api/v1/{rest:path}", methods=["GET"])
+async def recon_knox(rest: str, request: Request):
+    if ranger_user(request) is None:
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Knox"'}, content="Authentication required")
+    return recon_api(rest, request, features=True)
+
+
+@app.api_route("/recon-1/api/v1/{rest:path}", methods=["GET"])
+async def recon_old(rest: str, request: Request):
+    if not request.query_params.get("user.name"):
+        return Response(status_code=401, content="<html><body><h1>HTTP Status 401 - Authentication required</h1></body></html>", media_type="text/html")
+    return recon_api(rest, request, features=False)
+
+
+def recon_api(rest, request, features):
+    from datetime import datetime as _datetime, timezone as _timezone
+    query = dict(request.query_params)
+    html_404 = Response(status_code=404, content="<html><body><h1>HTTP Status 404 - Not Found</h1></body></html>", media_type="text/html")
+    limit = int(query.get("limit", 1000) or 1000)
+    prev = query.get("prevKey", "")
+    rest = rest.strip("/")
+    if rest == "volumes":
+        items = recon_after(sorted(RECON_VOLUMES, key=lambda v: v["volume"]), lambda v: v["volume"], prev)
+        return {"totalCount": len(RECON_VOLUMES), "volumes": items[:limit]}
+    if rest == "buckets":
+        items = sorted([recon_bucket_record(b) for b in RECON_BUCKETS if not query.get("volume") or b["volumeName"] == query["volume"]], key=lambda b: (b["volumeName"], b["name"]))
+        items = recon_after(items, lambda b: b["name"], prev)
+        return {"totalCount": len(items), "buckets": items[:limit]}
+    if rest == "keys/open/summary":
+        return RECON_OPEN
+    if rest == "keys/deletePending/summary":
+        return RECON_DELETED
+    if rest == "keys/deletePending/dirs/summary" and features:
+        return RECON_DELETED_DIRS
+    if rest == "keys/listKeys" and features:
+        prefix = query.get("startPrefix", "/")
+        if len([p for p in prefix.split("/") if p]) < 2:
+            return Response(status_code=400)
+        keys = sorted(k for k in RECON_KEYS if k[0].startswith(prefix))
+        if query.get("replicationType"):
+            keys = [k for k in keys if k[2]["replicationType"] == query["replicationType"]]
+        if query.get("keySize"):
+            keys = [k for k in keys if k[1] >= int(query["keySize"])]
+        if query.get("creationDate"):
+            since = _datetime.strptime(query["creationDate"], "%m-%d-%Y %H:%M:%S").replace(tzinfo=_timezone.utc).timestamp() * 1000
+            keys = [k for k in keys if k[3] >= since]
+        records = recon_after([recon_key_record(*k) for k in keys], lambda k: k["key"], prev)[:limit]
+        if not records:
+            return Response(status_code=204)
+        return {"status": "OK", "path": prefix, "replicatedDataSize": sum(r["replicatedSize"] for r in records), "unReplicatedDataSize": sum(r["size"] for r in records), "lastKey": records[-1]["key"], "keys": records}
+    if rest.startswith("namespace/"):
+        path = query.get("path", "")
+        if not path:
+            return Response(status_code=400)
+        path = path if path == "/" else path.rstrip("/")
+        if rest == "namespace/summary":
+            return recon_summary(path, flat=not features)
+        if rest == "namespace/usage":
+            return recon_du(path, query.get("files") == "true", query.get("replica") == "true")
+        if rest == "namespace/quota":
+            return recon_quota(path)
+        if rest == "namespace/dist":
+            return recon_dist(path)
+    if rest == "clusterState":
+        return RECON_CLUSTER_STATE
+    if rest == "utilization/fileCount":
+        return recon_file_counts(query.get("volume"), query.get("bucket"), int(query.get("fileSize", 0) or 0))
+    if rest == "storageDistribution" and features:
+        total = sum(k[1] for k in RECON_KEYS)
+        return {"globalStorage": {"totalFileSystemCapacity": 3400000000000, "totalReservedSpace": 60000000000, "totalOzoneCapacity": 3298534883328, "totalOzoneUsedSpace": 5184168588, "totalOzoneFreeSpace": 3200000000000, "totalOzoneCommittedSpace": 8589934592, "totalMinimumFreeSpace": 32985348833},
+            "globalNamespace": {"totalUsedSpace": total, "totalKeys": len(RECON_KEYS)},
+            "usedSpaceBreakdown": {"openKeyBytes": {"openKeyAndFileBytes": 31457280, "multipartOpenKeyBytes": 0, "totalOpenKeyBytes": 31457280}, "finalizedKeyBytes": total},
+            "dataNodeUsage": RECON_DATANODES}
+    return html_404
